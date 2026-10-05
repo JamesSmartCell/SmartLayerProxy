@@ -6,8 +6,12 @@ import { MultiValueMap } from '../types';
 import { loadConfig } from '../config';
 import { getEthereumMessageHash, recoverAddressFromSignature } from '../crypto/signature';
 
-const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
+// ESP TcpBridge treats 5 minutes without a server packet as a dead session, and
+// it checks that *before* reading the inbound 0x06. Send keepalives sooner.
+const KEEPALIVE_INTERVAL_MS = 2 * 60 * 1000;
 const UNAUTH_GRACE_MS = 30 * 1000;
+const MAX_TCP_CLIENTS = 64;
+const HEX_RE = /^[0-9a-fA-F]*$/;
 
 function createChallenge(): Buffer {
   return Buffer.from(require('crypto').randomBytes(16));
@@ -34,11 +38,20 @@ export class ASyncTCPService implements TCPCallback {
   private startServer(): void {
     const config = loadConfig();
     this.server = net.createServer((socket) => {
+      socket.on('error', () => undefined);
+      if (this.clientIndexList.size >= MAX_TCP_CLIENTS) {
+        console.log('Reject connection, at cap', MAX_TCP_CLIENTS);
+        socket.destroy();
+        return;
+      }
       const index = this.clientIndex++;
       console.log('New client connected: #' + index, normalizeRemoteIp(socket.remoteAddress));
       const client = new TCPClient(socket, this, index);
       this.clientIndexList.set(index, client);
       client.start();
+    });
+    this.server.on('error', (err) => {
+      console.error('TCP server error:', err instanceof Error ? err.message : err);
     });
 
     this.server.listen(config.tcpPort, () => {
@@ -50,6 +63,7 @@ export class ASyncTCPService implements TCPCallback {
     const removalAddrs: string[] = [];
 
     for (const [index, client] of [...this.clientIndexList]) {
+      try {
       if (!client.isAlive() || client.hasTimedOut()) {
         client.terminate();
         continue;
@@ -63,6 +77,9 @@ export class ASyncTCPService implements TCPCallback {
         continue;
       }
       client.sendKeepAlive();
+      } catch (err) {
+        console.error('Keepalive #' + index, err instanceof Error ? err.message : err);
+      }
     }
 
     for (const [address, idx] of this.clientMap) {
@@ -89,6 +106,21 @@ export class ASyncTCPService implements TCPCallback {
     this.devicePins.set(addrLower, { ip, lastSeen: Date.now() });
   }
 
+  private liveIndexForAddress(addrLower: string): number | undefined {
+    const idx = this.clientMap.get(addrLower);
+    if (idx === undefined) return undefined;
+    const existing = this.clientIndexList.get(idx);
+    if (!existing?.isAlive() || existing.getAddress().toLowerCase() !== addrLower) return undefined;
+    return idx;
+  }
+
+  /** Half-open leftover after ESP.restart() — no RX for 20s. */
+  private isQuiet(index: number): boolean {
+    const existing = this.clientIndexList.get(index);
+    if (!existing) return true;
+    return Date.now() - existing.getLastConnection() > 20_000;
+  }
+
   private pinAllowsIp(addrLower: string, ip: string): boolean {
     const pin = this.devicePins.get(addrLower);
     if (!pin) return true;
@@ -100,105 +132,161 @@ export class ASyncTCPService implements TCPCallback {
   }
 
   receivedMessage(index: number, bytes: Buffer): void {
-    const client = this.clientIndexList.get(index);
-    const opcode = bytes[0];
-    const message = bytes.subarray(1);
+    try {
+      this.parseClientMessage(index, bytes);
+    } catch (err) {
+      console.error('Parse error #' + index, err instanceof Error ? err.message : err);
+    }
+  }
 
-    // TLS ClientHello (16 03 01 …) / HTTP — scanners on the public TCP port.
-    // Drop that socket only; never run it through login or terminate-on-bad-sig.
-    if (opcode === 0x16 || opcode === 0x47 || opcode === 0x43 || opcode === 0x50) {
-      console.log('Drop probe #' + index, 'opcode=0x' + opcode.toString(16));
-      client?.terminate();
+  /** Drop a socket only if it has not completed a signed login. */
+  private dropUnauth(client: TCPClient | undefined, index: number, reason: string): void {
+    if (!client) return;
+    if (client.getAddress()) {
+      console.log('Ignore', reason, 'on authenticated #' + index);
       return;
     }
+    console.log('Drop #' + index, reason);
+    client.terminate();
+  }
+
+  private parseClientMessage(index: number, bytes: Buffer): void {
+    const client = this.clientIndexList.get(index);
+    if (!client || !bytes.length) return;
+
+    const opcode = bytes[0];
+    const message = bytes.subarray(1);
+    const authed = Boolean(client.getAddress());
 
     switch (opcode) {
       case 0x01: {
-        if (client?.getAddress()) {
-          console.log('Ignore extra login on authenticated #' + index);
-          break;
+        if (message.length < 20) {
+          this.dropUnauth(client, index, 'short login');
+          return;
         }
         const address = '0x' + message.subarray(0, 20).toString('hex');
         const addrLower = address.toLowerCase();
-        const ip = client?.getRemoteIp() || '';
-        if (client && !this.pinAllowsIp(addrLower, ip)) {
+        const ip = client.getRemoteIp();
+
+        // Same socket already signed in: ESP handshake retry. Send 0x02 again
+        // so it does not sit in handshake for 60s and then ESP.restart().
+        if (authed) {
+          console.log('Re-challenge authenticated #' + index);
+          client.setChallenge(createChallenge());
+          client.sendChallenge();
+          return;
+        }
+
+        const liveIdx = this.liveIndexForAddress(addrLower);
+        if (liveIdx !== undefined && liveIdx !== index && !this.isQuiet(liveIdx)) {
+          console.log('Reject login #' + index, address, '— #' + liveIdx, 'still live');
+          client.terminate();
+          return;
+        }
+        if (!this.pinAllowsIp(addrLower, ip)) {
           const pin = this.devicePins.get(addrLower);
           console.log('Reject login #' + index, address, 'from', ip, '(pinned to', pin?.ip + ')');
           client.terminate();
-          break;
+          return;
         }
         console.log('RCV: Login:', address, 'from', ip);
-        if (client) {
-          client.setChallenge(createChallenge());
-          client.sendChallenge();
-        }
-        break;
+        client.setChallenge(createChallenge());
+        client.sendChallenge();
+        return;
       }
       case 0x02:
-        break;
+        return;
       case 0x03:
       case 0x07: {
-        if (!client || message.length < 85) break;
+        if (message.length < 85) {
+          this.dropUnauth(client, index, 'short auth');
+          return;
+        }
         const addrBytes = message.subarray(0, 20);
         const sig = message.subarray(20, 85);
         const challenge = client.getChallenge();
-        const msgHash = opcode === 0x03 ? getEthereumMessageHash(challenge) : ethers.keccak256(challenge);
-        const recoveredAddr = recoverAddressFromSignature(msgHash, new Uint8Array(sig));
+        if (!challenge.length) {
+          this.dropUnauth(client, index, 'auth before challenge');
+          return;
+        }
+        let recoveredAddr = '';
+        try {
+          const msgHash = opcode === 0x03 ? getEthereumMessageHash(challenge) : ethers.keccak256(challenge);
+          recoveredAddr = recoverAddressFromSignature(msgHash, new Uint8Array(sig));
+        } catch (err) {
+          console.error('Recover failed #' + index, err instanceof Error ? err.message : err);
+          this.dropUnauth(client, index, 'recover throw');
+          return;
+        }
         const addrHex = '0x' + addrBytes.toString('hex');
         if (recoveredAddr && addrHex.toLowerCase() === recoveredAddr.toLowerCase()) {
           const ip = client.getRemoteIp();
           const addrLower = recoveredAddr.toLowerCase();
+          const liveIdx = this.liveIndexForAddress(addrLower);
+          if (liveIdx !== undefined && liveIdx !== index && !this.isQuiet(liveIdx)) {
+            console.log('Reject signed login #' + index, '— #' + liveIdx, 'still live');
+            client.terminate();
+            return;
+          }
           if (!this.pinAllowsIp(addrLower, ip)) {
             const pin = this.devicePins.get(addrLower);
             console.log('Reject signed login #' + index, recoveredAddr, 'from', ip, '(pinned to', pin?.ip + ')');
             client.terminate();
-            break;
+            return;
+          }
+          if (authed && client.getAddress().toLowerCase() === addrLower) {
+            console.log('Refresh auth #' + index, addrLower);
+            this.touchPin(addrLower, ip);
+            return;
           }
           client.setAddress(recoveredAddr);
           this.addToClientMap(recoveredAddr, index);
           this.touchPin(addrLower, ip);
-        } else if (!client.getAddress()) {
-          client.terminate();
-        } else {
-          console.log('Ignore bad auth packet on authenticated #' + index);
+          return;
         }
-        break;
+        this.dropUnauth(client, index, 'bad signature');
+        return;
       }
       case 0x04:
-        break;
-      case 0x08:
-      case 0x05: {
-        if (client) {
-          const addr = client.getAddress();
-          if (addr) {
-            const addrLower = addr.toLowerCase();
-            this.touchPin(addrLower, client.getRemoteIp());
-            let list = this.clientResponse.get(addrLower);
-            if (!list) {
-              list = [];
-              this.clientResponse.set(addrLower, list);
-            }
-            list.push(message.toString('utf-8'));
-          }
+        return;
+      case 0x05:
+      case 0x08: {
+        if (!authed) {
+          this.dropUnauth(client, index, 'response before login');
+          return;
         }
-        break;
+        const addrLower = client.getAddress().toLowerCase();
+        this.touchPin(addrLower, client.getRemoteIp());
+        let list = this.clientResponse.get(addrLower);
+        if (!list) {
+          list = [];
+          this.clientResponse.set(addrLower, list);
+        }
+        if (list.length > 8) list.shift();
+        list.push(message.subarray(0, 1024).toString('utf-8'));
+        return;
       }
       case 0x06:
-        if (client?.getAddress()) {
-          this.touchPin(client.getAddress().toLowerCase(), client.getRemoteIp());
-        }
-        break;
+        if (authed) this.touchPin(client.getAddress().toLowerCase(), client.getRemoteIp());
+        return;
+      default:
+        this.dropUnauth(client, index, 'unknown opcode 0x' + opcode.toString(16));
     }
   }
 
   private addToClientMap(recoveredAddr: string, index: number): void {
     const addrLower = recoveredAddr.toLowerCase();
+    const incoming = this.clientIndexList.get(index);
+    const incomingIp = incoming?.getRemoteIp() || '';
     for (const [clIndex, client] of this.clientIndexList) {
       if (clIndex === index) continue;
-      if (client.getAddress().toLowerCase() === addrLower) {
-        console.log('Terminating Index:', clIndex, '(', recoveredAddr, ')');
-        client.terminate();
+      if (client.getAddress().toLowerCase() !== addrLower) continue;
+      if (client.isAlive() && !this.isQuiet(clIndex)) {
+        console.log('Keep live #' + clIndex, 'do not replace with #' + index);
+        return;
       }
+      console.log('Replace quiet/dead #' + clIndex, 'with #' + index, incomingIp);
+      client.terminate();
     }
     const newClient = this.clientIndexList.get(index);
     console.log(
@@ -284,7 +372,23 @@ export class ASyncTCPService implements TCPCallback {
   }
 
   handleDeviceConnection(prefix: string, method: string, ipAddr: string): string {
-    const response = Buffer.from(method.startsWith('0x') ? method.slice(2) : method, 'hex');
+    try {
+      return this.parseBridgeMessage(prefix, method, ipAddr);
+    } catch (err) {
+      console.error('Bridge parse', err instanceof Error ? err.message : err);
+      return '';
+    }
+  }
+
+  private parseBridgeMessage(prefix: string, method: string, ipAddr: string): string {
+    const hex = (method.startsWith('0x') ? method.slice(2) : method).replace(/[^0-9a-fA-F]/g, '');
+    if (!hex || hex.length % 2 !== 0 || !HEX_RE.test(hex)) return '';
+    let response: Buffer;
+    try {
+      response = Buffer.from(hex, 'hex');
+    } catch {
+      return '';
+    }
     if (response.length < 1) return '';
     const opcode = response[0];
     const message = response.subarray(1);
@@ -302,11 +406,14 @@ export class ASyncTCPService implements TCPCallback {
       case 0x07: {
         const thisClient = this.clientLogins.get(prefix);
         if (!thisClient || thisClient.getIpAddress() !== ipAddr) return '';
+        if (message.length < 85) return '';
 
         const challengeBytes = thisClient.challenge;
         const sig = message.subarray(20, 85);
         const msgHash = opcode === 0x03 ? getEthereumMessageHash(challengeBytes) : ethers.keccak256(challengeBytes);
-        const recoveredAddr = '0x' + recoverAddressFromSignature(msgHash, new Uint8Array(sig)).toLowerCase();
+        const recovered = recoverAddressFromSignature(msgHash, new Uint8Array(sig));
+        if (!recovered) return '';
+        const recoveredAddr = recovered.toLowerCase();
 
         this.addressToClient.set(recoveredAddr, thisClient);
         this.clientLogins.delete(prefix);

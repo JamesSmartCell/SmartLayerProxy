@@ -24,6 +24,18 @@ app.use((req, res, next) => {
 
 app.use('/api', createRouter(service, tcpService));
 
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('HTTP error:', err instanceof Error ? err.message : err);
+  if (!res.headersSent) res.status(400).send('Bad request');
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('uncaughtException:', err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('unhandledRejection:', err);
+});
+
 app.listen(config.serverPort, () => {
   console.log(`SmartLayerProxy listening on port ${config.serverPort}`);
   console.log(`UDP: ${config.udpPort}, TCP: ${config.tcpPort}`);

@@ -2,6 +2,7 @@ import * as net from 'net';
 import { MultiValueMap } from '../types';
 
 export const CONNECTION_CLEANUP_TIME = 8 * 60 * 1000;
+export const MAX_TCP_PACKET = 4096;
 
 export function normalizeRemoteIp(ip: string | undefined | null): string {
   if (!ip) return '';
@@ -37,16 +38,26 @@ export class TCPClient {
     let buffer = Buffer.alloc(0);
 
     this.socket.on('data', (data: Buffer) => {
-      buffer = Buffer.concat([buffer, data]);
-      if (buffer.length > 0) {
+      try {
+        if (!data.length) return;
+        if (buffer.length + data.length > MAX_TCP_PACKET) {
+          console.log('Oversize packet #' + this.clientIndex, buffer.length + data.length, 'bytes');
+          buffer = Buffer.alloc(0);
+          // Never boot a signed-in device on garbage. Drop only probes.
+          if (!this.address) this.terminate();
+          return;
+        }
+        buffer = Buffer.concat([buffer, data]);
         const preview = buffer.subarray(0, 4).toString('hex');
         console.log('Receive Command:', preview);
-        // Full hex of TLS/HTTP probes fills journald and vacuums older boots
         const dump = buffer.length <= 96 ? buffer.toString('hex') : buffer.subarray(0, 96).toString('hex') + `…(+${buffer.length - 96}b)`;
         console.log('  -->', dump);
         this.isWaitingForResponse = false;
         this.lastConnection = Date.now();
         this.serverCallback.receivedMessage(this.clientIndex, buffer);
+        buffer = Buffer.alloc(0);
+      } catch (err) {
+        console.error('TCP data handler #' + this.clientIndex, err instanceof Error ? err.message : err);
         buffer = Buffer.alloc(0);
       }
     });
@@ -137,7 +148,7 @@ export class TCPClient {
       writeValue(chunks, method);
       for (const key of Object.keys(argMap)) {
         writeValue(chunks, key);
-        const param = argMap[key]?.length ? decodeURIComponent(argMap[key][0]) : '';
+        const param = argMap[key]?.length ? safeDecodeURI(argMap[key][0]) : '';
         writeValue(chunks, param);
       }
       const msg = Buffer.concat(chunks);
@@ -166,6 +177,14 @@ export class TCPClient {
  * [1 byte length] + [N bytes data]. Device reads: argLen = packet[index++] & 0xFF, then argLen bytes.
  * For "getChallenge" (11 bytes): 0b 67 65 74 43 68 61 6c 6c 65 6e 67 65
  */
+function safeDecodeURI(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function writeValue(chunks: Buffer[], value: string): void {
   const valueBuf = Buffer.from(value, 'utf-8');
   const length = Math.min(valueBuf.length, 255);

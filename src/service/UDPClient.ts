@@ -42,19 +42,38 @@ export class UDPClient {
     const rcvSessionToken = Buffer.alloc(8);
 
     this.socket.on('message', (msg, rinfo) => {
+      try {
+        this.handleUdpMessage(msg, rinfo, rcvSessionToken);
+      } catch (err) {
+        console.error('UDP parse', err instanceof Error ? err.message : err);
+      }
+    });
+    this.socket.on('error', (err) => {
+      console.error('UDP error:', err);
+      this.running = false;
+    });
+  }
+
+  private handleUdpMessage(msg: Buffer, rinfo: dgram.RemoteInfo, rcvSessionToken: Buffer): void {
       const address = rinfo.address;
       const port = rinfo.port;
-      console.log(`New Connection from ${address}:${port}`);
+      if (msg.length < 10) return;
 
       let offset = 0;
       const type = msg[offset++];
-      msg.copy(rcvSessionToken, 0, offset, offset + 8);
+      msg.copy(rcvSessionToken, 0, offset, Math.min(offset + 8, msg.length));
       offset += 8;
+      if (offset >= msg.length) return;
       const length = msg[offset++] & 0xff;
-      const payload = msg.subarray(offset, offset + length);
-      offset += length;
+      const payload = msg.subarray(offset, Math.min(offset + length, msg.length));
 
-      let thisClient = this.service.getClientFromToken(BigInt('0x' + rcvSessionToken.toString('hex')));
+      let tokenValue: bigint;
+      try {
+        tokenValue = BigInt('0x' + rcvSessionToken.toString('hex'));
+      } catch {
+        return;
+      }
+      let thisClient = this.service.getClientFromToken(tokenValue);
 
       if (thisClient) {
         if (thisClient.getIPAddress() !== address || thisClient.port !== port) {
@@ -67,7 +86,6 @@ export class UDPClient {
       switch (type) {
         case CLIENT_REQUEST_AUTHENTICATION:
           if (!thisClient) {
-            const tokenValue = BigInt('0x' + rcvSessionToken.toString('hex'));
             if (tokenValue === BigInt(0)) {
               thisClient = new UDPClientInstance(address, port, '');
               const newToken = thisClient.generateNewSessionToken();
@@ -112,8 +130,9 @@ export class UDPClient {
           break;
 
         case CLIENT_API_CALL_RETURN: {
+          if (!payload.length) break;
           const methodId = payload[0];
-          const payloadString = payload.subarray(1).toString('utf-8');
+          const payloadString = payload.subarray(1, 1024).toString('utf-8');
           log(address, `RCV Message: 0x${rcvSessionToken.toString('hex')}`);
           if (thisClient) {
             log(address, `Receive: MethodId: ${methodId} : ${payloadString} Client #${thisClient.getSessionTokenStr()}`);
@@ -131,12 +150,6 @@ export class UDPClient {
           log(address, `PING -> PONG (0x${rcvSessionToken.toString('hex')})`);
           break;
       }
-    });
-
-    this.socket.on('error', (err) => {
-      console.error('UDP error:', err);
-      this.running = false;
-    });
   }
 
   isRunning(): boolean {
@@ -187,7 +200,7 @@ export class UDPClient {
     payloadSize += writeValue(chunks, method);
     for (const key of Object.keys(argMap)) {
       payloadSize += writeValue(chunks, key);
-      const param = argMap[key]?.length ? decodeURIComponent(argMap[key][0]) : '';
+      const param = argMap[key]?.length ? safeDecodeURI(argMap[key][0]) : '';
       payloadSize += writeValue(chunks, param);
     }
     const packetBytes = Buffer.concat(chunks);
@@ -195,6 +208,14 @@ export class UDPClient {
     instance.setQuery(packetId, packetBytes, payloadSize);
     this.socket.send(packetBytes, instance.port, instance.getIPAddress());
     return packetId;
+  }
+}
+
+function safeDecodeURI(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
   }
 }
 
