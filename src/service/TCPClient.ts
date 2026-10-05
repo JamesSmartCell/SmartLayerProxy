@@ -1,7 +1,12 @@
 import * as net from 'net';
 import { MultiValueMap } from '../types';
 
-const CONNECTION_CLEANUP_TIME = 8 * 60 * 1000;
+export const CONNECTION_CLEANUP_TIME = 8 * 60 * 1000;
+
+export function normalizeRemoteIp(ip: string | undefined | null): string {
+  if (!ip) return '';
+  return ip.replace(/^::ffff:/i, '').toLowerCase();
+}
 
 export interface TCPCallback {
   receivedMessage(index: number, data: Buffer): void;
@@ -14,6 +19,7 @@ export class TCPClient {
   private running = false;
   private serverCallback: TCPCallback;
   private address = '';
+  private remoteIp: string;
   private clientIndex: number;
   private challenge: Buffer = Buffer.alloc(0);
   private isWaitingForResponse = false;
@@ -23,6 +29,7 @@ export class TCPClient {
     this.lastConnection = Date.now();
     this.serverCallback = callback;
     this.clientIndex = index;
+    this.remoteIp = normalizeRemoteIp(socket.remoteAddress);
   }
 
   start(): void {
@@ -32,8 +39,11 @@ export class TCPClient {
     this.socket.on('data', (data: Buffer) => {
       buffer = Buffer.concat([buffer, data]);
       if (buffer.length > 0) {
-        console.log('Receive Command:', buffer.subarray(0, 4).toString('hex'));
-        console.log('  -->', buffer.toString('hex'));
+        const preview = buffer.subarray(0, 4).toString('hex');
+        console.log('Receive Command:', preview);
+        // Full hex of TLS/HTTP probes fills journald and vacuums older boots
+        const dump = buffer.length <= 96 ? buffer.toString('hex') : buffer.subarray(0, 96).toString('hex') + `…(+${buffer.length - 96}b)`;
+        console.log('  -->', dump);
         this.isWaitingForResponse = false;
         this.lastConnection = Date.now();
         this.serverCallback.receivedMessage(this.clientIndex, buffer);
@@ -50,6 +60,10 @@ export class TCPClient {
       this.running = false;
       this.serverCallback.disconnect(this.clientIndex);
     });
+  }
+
+  getLastConnection(): number {
+    return this.lastConnection;
   }
 
   hasTimedOut(): boolean {
@@ -70,6 +84,10 @@ export class TCPClient {
 
   getAddress(): string {
     return this.address;
+  }
+
+  getRemoteIp(): string {
+    return this.remoteIp || normalizeRemoteIp(this.socket.remoteAddress);
   }
 
   getChallenge(): Buffer {

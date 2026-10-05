@@ -1,12 +1,13 @@
 import * as net from 'net';
 import { ethers } from 'ethers';
-import { TCPClient, TCPCallback } from './TCPClient';
+import { CONNECTION_CLEANUP_TIME, normalizeRemoteIp, TCPClient, TCPCallback } from './TCPClient';
 import { APIClient } from './APIClient';
 import { MultiValueMap } from '../types';
 import { loadConfig } from '../config';
 import { getEthereumMessageHash, recoverAddressFromSignature } from '../crypto/signature';
 
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
+const UNAUTH_GRACE_MS = 30 * 1000;
 
 function createChallenge(): Buffer {
   return Buffer.from(require('crypto').randomBytes(16));
@@ -22,6 +23,8 @@ export class ASyncTCPService implements TCPCallback {
   private clientLogins = new Map<string, APIClient>();
   private addressToClient = new Map<string, APIClient>();
   private tokenToAddress = new Map<string, string>();
+  /** Signed-in device → last known socket IP. Survives a drop until inactivity. */
+  private devicePins = new Map<string, { ip: string; lastSeen: number }>();
 
   constructor() {
     this.startServer();
@@ -32,7 +35,7 @@ export class ASyncTCPService implements TCPCallback {
     const config = loadConfig();
     this.server = net.createServer((socket) => {
       const index = this.clientIndex++;
-      console.log('New client connected: #' + index);
+      console.log('New client connected: #' + index, normalizeRemoteIp(socket.remoteAddress));
       const client = new TCPClient(socket, this, index);
       this.clientIndexList.set(index, client);
       client.start();
@@ -47,11 +50,19 @@ export class ASyncTCPService implements TCPCallback {
     const removalAddrs: string[] = [];
 
     for (const [index, client] of [...this.clientIndexList]) {
-      if (!client.isAlive() || !client.getAddress() || client.hasTimedOut()) {
+      if (!client.isAlive() || client.hasTimedOut()) {
         client.terminate();
-      } else {
-        client.sendKeepAlive();
+        continue;
       }
+      // Probes never log in — drop them quickly. Do not use empty address as a
+      // reason to kill a device that already authenticated.
+      if (!client.getAddress()) {
+        if (Date.now() - client.getLastConnection() > UNAUTH_GRACE_MS) {
+          client.terminate();
+        }
+        continue;
+      }
+      client.sendKeepAlive();
     }
 
     for (const [address, idx] of this.clientMap) {
@@ -61,6 +72,31 @@ export class ASyncTCPService implements TCPCallback {
       console.log('REMOVE orphaned client:', addr);
       this.clientMap.delete(addr);
     }
+    this.expirePins();
+  }
+
+  private expirePins(): void {
+    const now = Date.now();
+    for (const [addr, pin] of this.devicePins) {
+      if (now - pin.lastSeen <= CONNECTION_CLEANUP_TIME) continue;
+      this.devicePins.delete(addr);
+      console.log('Expire IP pin:', addr, pin.ip);
+    }
+  }
+
+  private touchPin(addrLower: string, ip: string): void {
+    if (!addrLower || !ip) return;
+    this.devicePins.set(addrLower, { ip, lastSeen: Date.now() });
+  }
+
+  private pinAllowsIp(addrLower: string, ip: string): boolean {
+    const pin = this.devicePins.get(addrLower);
+    if (!pin) return true;
+    if (Date.now() - pin.lastSeen > CONNECTION_CLEANUP_TIME) {
+      this.devicePins.delete(addrLower);
+      return true;
+    }
+    return pin.ip === ip;
   }
 
   receivedMessage(index: number, bytes: Buffer): void {
@@ -68,10 +104,30 @@ export class ASyncTCPService implements TCPCallback {
     const opcode = bytes[0];
     const message = bytes.subarray(1);
 
+    // TLS ClientHello (16 03 01 …) / HTTP — scanners on the public TCP port.
+    // Drop that socket only; never run it through login or terminate-on-bad-sig.
+    if (opcode === 0x16 || opcode === 0x47 || opcode === 0x43 || opcode === 0x50) {
+      console.log('Drop probe #' + index, 'opcode=0x' + opcode.toString(16));
+      client?.terminate();
+      return;
+    }
+
     switch (opcode) {
       case 0x01: {
-        const address = '0x' + message.toString('hex');
-        console.log('RCV: Login:', address);
+        if (client?.getAddress()) {
+          console.log('Ignore extra login on authenticated #' + index);
+          break;
+        }
+        const address = '0x' + message.subarray(0, 20).toString('hex');
+        const addrLower = address.toLowerCase();
+        const ip = client?.getRemoteIp() || '';
+        if (client && !this.pinAllowsIp(addrLower, ip)) {
+          const pin = this.devicePins.get(addrLower);
+          console.log('Reject login #' + index, address, 'from', ip, '(pinned to', pin?.ip + ')');
+          client.terminate();
+          break;
+        }
+        console.log('RCV: Login:', address, 'from', ip);
         if (client) {
           client.setChallenge(createChallenge());
           client.sendChallenge();
@@ -89,11 +145,22 @@ export class ASyncTCPService implements TCPCallback {
         const msgHash = opcode === 0x03 ? getEthereumMessageHash(challenge) : ethers.keccak256(challenge);
         const recoveredAddr = recoverAddressFromSignature(msgHash, new Uint8Array(sig));
         const addrHex = '0x' + addrBytes.toString('hex');
-        if (addrHex.toLowerCase() === recoveredAddr.toLowerCase()) {
+        if (recoveredAddr && addrHex.toLowerCase() === recoveredAddr.toLowerCase()) {
+          const ip = client.getRemoteIp();
+          const addrLower = recoveredAddr.toLowerCase();
+          if (!this.pinAllowsIp(addrLower, ip)) {
+            const pin = this.devicePins.get(addrLower);
+            console.log('Reject signed login #' + index, recoveredAddr, 'from', ip, '(pinned to', pin?.ip + ')');
+            client.terminate();
+            break;
+          }
           client.setAddress(recoveredAddr);
           this.addToClientMap(recoveredAddr, index);
-        } else {
+          this.touchPin(addrLower, ip);
+        } else if (!client.getAddress()) {
           client.terminate();
+        } else {
+          console.log('Ignore bad auth packet on authenticated #' + index);
         }
         break;
       }
@@ -105,6 +172,7 @@ export class ASyncTCPService implements TCPCallback {
           const addr = client.getAddress();
           if (addr) {
             const addrLower = addr.toLowerCase();
+            this.touchPin(addrLower, client.getRemoteIp());
             let list = this.clientResponse.get(addrLower);
             if (!list) {
               list = [];
@@ -116,6 +184,9 @@ export class ASyncTCPService implements TCPCallback {
         break;
       }
       case 0x06:
+        if (client?.getAddress()) {
+          this.touchPin(client.getAddress().toLowerCase(), client.getRemoteIp());
+        }
         break;
     }
   }
@@ -129,7 +200,17 @@ export class ASyncTCPService implements TCPCallback {
         client.terminate();
       }
     }
-    console.log('Link Address:', recoveredAddr, '->', addrLower, 'Client Index:', index);
+    const newClient = this.clientIndexList.get(index);
+    console.log(
+      'Link Address:',
+      recoveredAddr,
+      '->',
+      addrLower,
+      'Client Index:',
+      index,
+      'IP:',
+      newClient?.getRemoteIp() || '?'
+    );
     this.clientMap.set(addrLower, index);
   }
 
@@ -138,6 +219,11 @@ export class ASyncTCPService implements TCPCallback {
     if (client) {
       console.log('Disconnect: #' + index);
       this.clientIndexList.delete(index);
+      const addr = client.getAddress()?.toLowerCase();
+      if (addr && this.clientMap.get(addr) === index) {
+        this.clientMap.delete(addr);
+        console.log('Unlink Address:', addr, 'Client Index:', index, '(IP pin kept until inactivity)');
+      }
     }
   }
 
