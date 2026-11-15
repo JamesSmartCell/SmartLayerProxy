@@ -135,6 +135,9 @@ describe('TelemetryService', () => {
     it('should calculate reconnect times', async () => {
       const device = '0xabc123';
       telemetry.recordDeviceConnection(device, 'TCP');
+      
+      await new Promise(resolve => setTimeout(resolve, 10));
+      
       telemetry.recordDeviceDisconnect(device, 'timeout');
       
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -142,7 +145,10 @@ describe('TelemetryService', () => {
       telemetry.recordDeviceConnection(device, 'TCP');
 
       const metrics = telemetry.getDeviceMetrics(device);
-      expect(metrics?.medianReconnectTime).toBeGreaterThan(0);
+      expect(metrics?.medianReconnectTime).toBeDefined();
+      if (metrics?.medianReconnectTime !== undefined) {
+        expect(metrics.medianReconnectTime).toBeGreaterThan(0);
+      }
     });
   });
 

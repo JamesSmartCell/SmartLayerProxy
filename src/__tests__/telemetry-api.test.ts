@@ -1,9 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { TelemetryService } from '../service/TelemetryService';
-import { ASyncService } from '../service/ASyncService';
-import { ASyncTCPService } from '../service/ASyncTCPService';
 import { createRouter } from '../api/routes';
 import { unlinkSync, existsSync } from 'fs';
 
@@ -12,8 +10,6 @@ const TEST_API_KEY = 'test-api-key-12345';
 
 describe('Telemetry API', () => {
   let app: express.Application;
-  let service: ASyncService;
-  let tcpService: ASyncTCPService;
 
   beforeAll(() => {
     process.env.TELEMETRY_API_KEY = TEST_API_KEY;
@@ -28,9 +24,21 @@ describe('Telemetry API', () => {
 
     app = express();
     app.use(express.json());
-    service = new ASyncService();
-    tcpService = new ASyncTCPService();
-    app.use('/api', createRouter(service, tcpService));
+    
+    const mockService = {
+      checkServices: vi.fn(),
+      getResponse: vi.fn(),
+      getDeviceAddress: vi.fn(),
+    } as any;
+    
+    const mockTcpService = {
+      getResponse: vi.fn(),
+      getDeviceAddress: vi.fn(),
+      handleDeviceConnection: vi.fn(),
+      getLoginChallenge: vi.fn(),
+    } as any;
+    
+    app.use('/api', createRouter(mockService, mockTcpService));
   });
 
   afterEach(() => {
