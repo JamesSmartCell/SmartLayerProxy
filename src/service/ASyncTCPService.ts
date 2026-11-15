@@ -149,6 +149,11 @@ export class ASyncTCPService implements TCPCallback {
       return;
     }
     console.log('Drop #' + index, client.getRemoteIp() || '?', reason);
+    
+    const disconnectReason = (reason === 'bad signature' || reason === 'recover throw') 
+      ? 'signature_failure' 
+      : 'auth_failure';
+    
     client.terminate();
   }
 
@@ -305,12 +310,15 @@ export class ASyncTCPService implements TCPCallback {
     this.clientMap.set(addrLower, index);
   }
 
-  disconnect(index: number): void {
+  disconnect(index: number, reason: 'client_close' | 'socket_error' | 'terminated'): void {
     const client = this.clientIndexList.get(index);
     if (client) {
-      console.log('Disconnect: #' + index);
-      this.clientIndexList.delete(index);
+      console.log('Disconnect: #' + index, 'reason:', reason);
       const addr = client.getAddress()?.toLowerCase();
+      if (addr) {
+        this.telemetry.recordDeviceDisconnect(addr, reason);
+      }
+      this.clientIndexList.delete(index);
       if (addr && this.clientMap.get(addr) === index) {
         this.clientMap.delete(addr);
         console.log('Unlink Address:', addr, 'Client Index:', index, '(IP pin kept until inactivity)');

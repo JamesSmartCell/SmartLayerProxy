@@ -5,6 +5,9 @@ export interface Config {
   serverPort: number;
   udpPort: number;
   tcpPort: number;
+  telemetryDbPath: string;
+  telemetryRetentionDays: number;
+  telemetryApiKey?: string;
 }
 
 function loadProperties(): Record<string, string> {
@@ -43,5 +46,8 @@ export function loadConfig(): Config {
     serverPort: parseInt(props['server.port'] || '8081', 10),
     udpPort: parseInt(props['udp.port'] || '8083', 10),
     tcpPort: parseInt(props['tcp.port'] || '8082', 10),
+    telemetryDbPath: process.env.TELEMETRY_DB_PATH || props['telemetry.db.path'] || './data/telemetry.db',
+    telemetryRetentionDays: parseInt(process.env.TELEMETRY_RETENTION_DAYS || props['telemetry.retention.days'] || '30', 10),
+    telemetryApiKey: process.env.TELEMETRY_API_KEY || props['telemetry.api.key'],
   };
 }
