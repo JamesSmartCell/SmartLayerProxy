@@ -4,6 +4,7 @@ import { ASyncTCPService } from '../service/ASyncTCPService';
 import * as passkey from './passkey';
 import { uploadToR2, isR2Configured } from '../service/CloudflareR2';
 import { randomUUID } from 'crypto';
+import { TelemetryService } from '../service/TelemetryService';
 
 const CHECK_CONNECTION_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -40,8 +41,10 @@ function parseQueryParams(req: Request): Record<string, string[]> {
 
 export function createRouter(service: ASyncService, tcpService: ASyncTCPService): Router {
   const router = Router();
+  const telemetry = TelemetryService.getInstance();
 
   setInterval(() => service.checkServices(), CHECK_CONNECTION_INTERVAL_MS);
+  setInterval(() => telemetry.cleanupOldMetrics(), 60 * 60 * 1000);
 
   router.use((req, res, next) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -270,6 +273,53 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
   router.all('/smartpass/:attestation', (_req, res) => {
     const response = '{"quests": 4, "points": 450, "level": 1 }';
     res.status(201).send(response);
+  });
+
+  // ========== Telemetry routes ==========
+  router.get('/telemetry/system', (_req, res) => {
+    try {
+      const metrics = telemetry.getSystemMetrics();
+      res.json(metrics);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/telemetry/devices', (_req, res) => {
+    try {
+      const devices = telemetry.getAllDeviceMetrics();
+      res.json(devices);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/telemetry/devices/:address', (req, res) => {
+    try {
+      const address = normalizeAddress(req.params.address);
+      const metrics = telemetry.getDeviceMetrics(address);
+      if (!metrics) {
+        res.status(404).json({ error: 'Device not found' });
+        return;
+      }
+      res.json(metrics);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/telemetry/methods', (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 10;
+      const methods = telemetry.getTopMethods(limit);
+      res.json(methods);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
   });
 
   // Unrecognised /api/* paths: immediately reset connection

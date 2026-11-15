@@ -62,6 +62,22 @@ Environment variables (or in application.properties):
 | `PUT /api/v1/passkeys` | Upsert passkey (recovery sync) |
 | `GET /api/v1/passkeys/:credentialId` | Get passkey by id (recovery) |
 
+### Telemetry / Device Metrics
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/telemetry/system` | Get system-wide metrics (uptime, total devices, API calls) |
+| `GET /api/telemetry/devices` | Get metrics for all devices |
+| `GET /api/telemetry/devices/:address` | Get metrics for a specific device |
+| `GET /api/telemetry/methods?limit=10` | Get top API methods by usage |
+
+**Telemetry Features:**
+- Device connection tracking (UDP/TCP/BOTH)
+- API call success/failure rates
+- Average response times per device
+- Method usage statistics
+- Active device monitoring (last 5 minutes)
+- Automatic cleanup of stale metrics (24 hours)
+
 ## Resource Usage
 
 The TypeScript server typically uses ~50-80MB RAM vs 200-400MB+ for the Java/Spring Boot version.

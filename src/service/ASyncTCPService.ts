@@ -5,6 +5,7 @@ import { APIClient } from './APIClient';
 import { MultiValueMap } from '../types';
 import { loadConfig } from '../config';
 import { getEthereumMessageHash, recoverAddressFromSignature } from '../crypto/signature';
+import { TelemetryService } from './TelemetryService';
 
 // ESP TcpBridge treats 5 minutes without a server packet as a dead session, and
 // it checks that *before* reading the inbound 0x06. Send keepalives sooner.
@@ -29,6 +30,7 @@ export class ASyncTCPService implements TCPCallback {
   private tokenToAddress = new Map<string, string>();
   /** Signed-in device → last known socket IP. Survives a drop until inactivity. */
   private devicePins = new Map<string, { ip: string; lastSeen: number }>();
+  private telemetry = TelemetryService.getInstance();
 
   constructor() {
     this.startServer();
@@ -242,6 +244,7 @@ export class ASyncTCPService implements TCPCallback {
           client.setAddress(recoveredAddr);
           this.addToClientMap(recoveredAddr, index);
           this.touchPin(addrLower, ip);
+          this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip);
           return;
         }
         this.dropUnauth(client, index, 'bad signature');
@@ -316,22 +319,26 @@ export class ASyncTCPService implements TCPCallback {
   }
 
   async getResponse(address: string, method: string, argMap: MultiValueMap, _origin: string): Promise<string> {
+    const startTime = Date.now();
     const addrLower = address.toLowerCase();
     if (!this.clientMap.has(addrLower) && !this.addressToClient.has(addrLower)) {
       const knownAddrs = [...this.clientMap.keys()];
       console.log('No device found for', addrLower, '| Known TCP clients:', knownAddrs.length, knownAddrs);
+      this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
       return 'No device found';
     }
 
     const idx = this.clientMap.get(addrLower);
     if (idx === undefined) {
       console.log('Address in map but idx undefined (race?) for', addrLower);
+      this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
       return 'No device found';
     }
 
     const client = this.clientIndexList.get(idx);
     if (!client) {
       console.log('Client #' + idx + ' not in clientIndexList (disconnected?)');
+      this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
       return 'No device found';
     }
 
@@ -347,9 +354,11 @@ export class ASyncTCPService implements TCPCallback {
       await new Promise((r) => setTimeout(r, 100));
       const list = this.clientResponse.get(addrLower);
       if (list?.length) {
+        this.telemetry.recordApiCall(address, method, true, Date.now() - startTime);
         return list[0];
       }
     }
+    this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
     return 'Timed out';
   }
 

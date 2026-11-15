@@ -2,6 +2,7 @@ import { UDPClient } from './UDPClient';
 import { UDPClientInstance } from './UDPClientInstance';
 import { MultiValueMap } from '../types';
 import { loadConfig } from '../config';
+import { TelemetryService } from './TelemetryService';
 
 const CONNECTION_CLEANUP_TIME = 5 * 60 * 1000;
 
@@ -10,6 +11,7 @@ export class ASyncService {
   private tokenToClient = new Map<bigint, UDPClientInstance>();
   private addressToClient = new Map<string, UDPClientInstance[]>();
   private IoTAddrToQueryID = new Map<string, number>();
+  private telemetry = TelemetryService.getInstance();
 
   constructor() {
     const config = loadConfig();
@@ -27,8 +29,12 @@ export class ASyncService {
   }
 
   async getResponse(address: string, method: string, argMap: MultiValueMap, origin: string): Promise<string> {
+    const startTime = Date.now();
     let instance = this.getLatestClient(address.toLowerCase());
-    if (!instance) return 'No device found';
+    if (!instance) {
+      this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
+      return 'No device found';
+    }
 
     let methodId: number;
     const checkId = instance.getMatchingQuery(origin, method);
@@ -39,7 +45,10 @@ export class ASyncService {
       methodId = instance.sendToClient(origin, method, argMap);
     }
 
-    if (methodId === -1) return 'API send error';
+    if (methodId === -1) {
+      this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
+      return 'API send error';
+    }
 
     let resendIntervalCounter = 0;
     let resendCount = 30;
@@ -59,6 +68,10 @@ export class ASyncService {
     }
 
     const response = instance?.getResponse(methodId) ?? (resendCount === 0 ? 'Timed out' : '');
+    const responseTime = Date.now() - startTime;
+    const success = resendCount > 0 && response !== 'Timed out';
+
+    this.telemetry.recordApiCall(address, method, success, responseTime);
 
     if (resendCount === 0) {
       console.log('Timed out');
