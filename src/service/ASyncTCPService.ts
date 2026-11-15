@@ -146,7 +146,7 @@ export class ASyncTCPService implements TCPCallback {
       console.log('Ignore', reason, 'on authenticated #' + index);
       return;
     }
-    console.log('Drop #' + index, reason);
+    console.log('Drop #' + index, client.getRemoteIp() || '?', reason);
     client.terminate();
   }
 

@@ -49,9 +49,10 @@ export class TCPClient {
         }
         buffer = Buffer.concat([buffer, data]);
         const preview = buffer.subarray(0, 4).toString('hex');
-        console.log('Receive Command:', preview);
+        const peer = this.getRemoteIp() || '?';
+        console.log('Receive Command:', preview, '#' + this.clientIndex, peer);
         const dump = buffer.length <= 96 ? buffer.toString('hex') : buffer.subarray(0, 96).toString('hex') + `…(+${buffer.length - 96}b)`;
-        console.log('  -->', dump);
+        console.log('  -->', dump, '#' + this.clientIndex, peer);
         this.isWaitingForResponse = false;
         this.lastConnection = Date.now();
         this.serverCallback.receivedMessage(this.clientIndex, buffer);
