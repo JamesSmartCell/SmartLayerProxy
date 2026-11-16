@@ -2,9 +2,11 @@ import express, { Router, Request, Response, NextFunction } from 'express';
 import { ASyncService } from '../service/ASyncService';
 import { ASyncTCPService } from '../service/ASyncTCPService';
 import * as passkey from './passkey';
-import { uploadToR2, isR2Configured } from '../service/CloudflareR2';
+import { uploadToR2, isR2Configured, getFirmwareBucketName } from '../service/CloudflareR2';
 import { randomUUID } from 'crypto';
 import { TelemetryService } from '../service/TelemetryService';
+import { FirmwareService } from '../service/FirmwareService';
+import { AdminAuthService } from '../service/AdminAuthService';
 import { loadConfig } from '../config';
 
 const CHECK_CONNECTION_INTERVAL_MS = 5 * 60 * 1000;
@@ -51,7 +53,7 @@ function telemetryAuthMiddleware(req: Request, res: Response, next: NextFunction
   const authHeader = req.get('Authorization');
   const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
 
-  if (!token || token !== config.telemetryApiKey) {
+  if (!token || !AdminAuthService.constantTimeCompare(token, config.telemetryApiKey)) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
@@ -59,9 +61,24 @@ function telemetryAuthMiddleware(req: Request, res: Response, next: NextFunction
   next();
 }
 
+function getAdminAddresses(): string[] {
+  const config = loadConfig();
+  return [...config.adminAddresses, ...config.telemetryAdminAddresses];
+}
+
 export function createRouter(service: ASyncService, tcpService: ASyncTCPService): Router {
   const router = Router();
   const telemetry = TelemetryService.getInstance();
+  const adminAuth = AdminAuthService.getInstance();
+  const config = loadConfig();
+  
+  let firmware: FirmwareService | null = null;
+  try {
+    const firmwareDbPath = config.telemetryDbPath.replace(/telemetry\.db$/, 'firmware.db');
+    firmware = FirmwareService.getInstance(firmwareDbPath);
+  } catch (err) {
+    console.warn('[Firmware] Service initialization skipped:', err);
+  }
 
   setInterval(() => service.checkServices(), CHECK_CONNECTION_INTERVAL_MS);
 
@@ -70,12 +87,351 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
     res.set('Access-Control-Max-Age', '10000');
     res.set('Access-Control-Allow-Credentials', 'false');
     res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Content-Type');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (req.method === 'OPTIONS') {
       res.status(204).end();
       return;
     }
     next();
+  });
+
+  // ========== Admin authentication ==========
+  router.get('/admin/challenge', (req, res) => {
+    try {
+      const challenge = adminAuth.generateChallenge();
+      res.json(challenge);
+    } catch (err) {
+      console.error('[Admin] Challenge generation error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  // ========== Telemetry feed & ack (Part B) ==========
+  router.get('/telemetry/feed', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const afterId = parseInt(req.query.afterId as string) || 0;
+      const limit = Math.min(
+        parseInt(req.query.limit as string) || 1000,
+        config.telemetryFeedMaxLimit
+      );
+
+      const stmt = telemetry['db'].prepare(`
+        SELECT
+          id, timestamp, device, event_type as eventType, protocol,
+          disconnect_reason as disconnectReason, api_method as apiMethod,
+          api_success as apiSuccess, api_response_time as apiResponseTime,
+          ip_address as ipAddress, firmware_version as firmwareVersion
+        FROM device_events
+        WHERE id > ?
+        ORDER BY id ASC
+        LIMIT ?
+      `);
+
+      const rows = stmt.all(afterId, limit) as any[];
+      
+      const maxIdStmt = telemetry['db'].prepare('SELECT MAX(id) as maxId FROM device_events');
+      const { maxId } = maxIdStmt.get() as any;
+      
+      const hasMore = rows.length === limit && maxId > (rows[rows.length - 1]?.id || 0);
+
+      res.json({
+        rows: rows.map(r => ({
+          ...r,
+          apiSuccess: r.apiSuccess !== null && r.apiSuccess !== undefined ? r.apiSuccess === 1 : undefined,
+        })),
+        maxId: maxId || 0,
+        hasMore,
+        serverTime: Date.now(),
+      });
+    } catch (err) {
+      console.error('[Telemetry] Feed error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.post('/telemetry/ack', telemetryAuthMiddleware, async (req, res) => {
+    try {
+      const { upToId, signature, message, dryRun } = req.body || {};
+      
+      if (!upToId || typeof upToId !== 'number') {
+        res.status(400).json({ error: 'Missing or invalid upToId' });
+        return;
+      }
+
+      const adminAddresses = getAdminAddresses();
+      if (adminAddresses.length === 0) {
+        res.status(503).json({ error: 'Admin addresses not configured' });
+        return;
+      }
+
+      if (!signature || !message) {
+        res.status(400).json({ error: 'Missing signature or message' });
+        return;
+      }
+
+      // Extract nonce from message
+      const nonceMatch = message.match(/:([a-f0-9]{64})$/);
+      if (!nonceMatch) {
+        res.status(400).json({ error: 'Message does not contain valid nonce' });
+        return;
+      }
+      const nonce = nonceMatch[1];
+
+      // Verify message format: 'ack:<upToId>:<nonce>'
+      const expectedMessagePrefix = `ack:${upToId}:`;
+      if (!message.startsWith(expectedMessagePrefix)) {
+        res.status(400).json({ error: 'Message format mismatch' });
+        return;
+      }
+
+      const result = adminAuth.verifyAndBurnNonce(nonce, message, signature, adminAddresses);
+      if (!result.valid) {
+        res.status(403).json({ error: result.error || 'Signature verification failed' });
+        return;
+      }
+
+      const forceDryRun = !config.telemetryAckEnabled;
+      const effectiveDryRun = dryRun || forceDryRun;
+
+      if (effectiveDryRun) {
+        const countStmt = telemetry['db'].prepare('SELECT COUNT(*) as count FROM device_events WHERE id <= ?');
+        const { count } = countStmt.get(upToId) as any;
+        res.json({
+          wouldDelete: count,
+          dryRun: true,
+          reason: forceDryRun ? 'TELEMETRY_ACK_ENABLED=false' : 'dryRun requested',
+        });
+        return;
+      }
+
+      const deleteStmt = telemetry['db'].prepare('DELETE FROM device_events WHERE id <= ?');
+      const deleteResult = deleteStmt.run(upToId);
+
+      const remainingStmt = telemetry['db'].prepare('SELECT COUNT(*) as count FROM device_events');
+      const { count: remaining } = remainingStmt.get() as any;
+
+      // Optional incremental vacuum
+      if (deleteResult.changes > 1000) {
+        try {
+          telemetry['db'].pragma('incremental_vacuum');
+        } catch (vacErr) {
+          console.warn('[Telemetry] Vacuum warning:', vacErr);
+        }
+      }
+
+      res.json({
+        deleted: deleteResult.changes,
+        remaining,
+        deletedBy: result.address,
+      });
+    } catch (err) {
+      console.error('[Telemetry] Ack error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  // ========== Firmware coordinator (Part C) ==========
+  router.get('/firmware/:project/latest', (req, res) => {
+    try {
+      if (!firmware) {
+        res.status(503).json({ error: 'Firmware service not initialized' });
+        return;
+      }
+
+      const project = req.params.project;
+      const latest = firmware.getLatestFirmware(project);
+      
+      if (!latest) {
+        res.status(404).json({ error: 'No firmware found for this project' });
+        return;
+      }
+
+      res.json(latest);
+    } catch (err) {
+      console.error('[Firmware] Latest query error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/firmware/:project', (req, res) => {
+    try {
+      if (!firmware) {
+        res.status(503).json({ error: 'Firmware service not initialized' });
+        return;
+      }
+
+      const project = req.params.project;
+      const versions = firmware.listVersions(project);
+
+      res.json({ project, versions });
+    } catch (err) {
+      console.error('[Firmware] List versions error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.post('/firmware/:project/current', async (req, res) => {
+    try {
+      if (!firmware) {
+        res.status(503).json({ error: 'Firmware service not initialized' });
+        return;
+      }
+
+      const project = req.params.project;
+      const { version, signature, message } = req.body || {};
+
+      if (!version) {
+        res.status(400).json({ error: 'Missing version' });
+        return;
+      }
+
+      const adminAddresses = getAdminAddresses();
+      if (adminAddresses.length === 0) {
+        res.status(503).json({ error: 'Admin addresses not configured' });
+        return;
+      }
+
+      if (!signature || !message) {
+        res.status(400).json({ error: 'Missing signature or message' });
+        return;
+      }
+
+      // Extract nonce from message
+      const nonceMatch = message.match(/:([a-f0-9]{64})$/);
+      if (!nonceMatch) {
+        res.status(400).json({ error: 'Message does not contain valid nonce' });
+        return;
+      }
+      const nonce = nonceMatch[1];
+
+      // Verify message format: 'current:<project>:<version>:<nonce>'
+      const expectedMessage = `current:${project}:${version}:${nonce}`;
+      if (message !== expectedMessage) {
+        res.status(400).json({ error: 'Message format mismatch' });
+        return;
+      }
+
+      const result = adminAuth.verifyAndBurnNonce(nonce, message, signature, adminAddresses);
+      if (!result.valid) {
+        res.status(403).json({ error: result.error || 'Signature verification failed' });
+        return;
+      }
+
+      const success = firmware.setCurrentVersion(project, version);
+      if (!success) {
+        res.status(404).json({ error: 'Version not found' });
+        return;
+      }
+
+      res.json({ success: true, project, version, setBy: result.address });
+    } catch (err) {
+      console.error('[Firmware] Set current error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.post('/firmware/:project', express.raw({ type: ['application/octet-stream', 'application/x-binary'], limit: `${config.firmwareUploadMaxSizeMb}mb` }), async (req, res) => {
+    try {
+      if (!firmware) {
+        res.status(503).json({ error: 'Firmware service not initialized' });
+        return;
+      }
+
+      if (!isR2Configured()) {
+        res.status(503).json({ error: 'R2 storage not configured' });
+        return;
+      }
+
+      const project = req.params.project;
+      const version = req.query.version as string;
+      const signature = req.query.signature as string;
+      const message = req.query.message as string;
+
+      if (!version) {
+        res.status(400).json({ error: 'Missing version query parameter' });
+        return;
+      }
+
+      const adminAddresses = getAdminAddresses();
+      if (adminAddresses.length === 0) {
+        res.status(503).json({ error: 'Admin addresses not configured' });
+        return;
+      }
+
+      if (!signature || !message) {
+        res.status(400).json({ error: 'Missing signature or message query parameters' });
+        return;
+      }
+
+      const body = req.body as Buffer | undefined;
+      if (!body || body.length === 0) {
+        res.status(400).json({ error: 'No firmware data' });
+        return;
+      }
+
+      const sha256 = FirmwareService.computeSha256(body);
+
+      // Extract nonce from message
+      const nonceMatch = message.match(/:([a-f0-9]{64})$/);
+      if (!nonceMatch) {
+        res.status(400).json({ error: 'Message does not contain valid nonce' });
+        return;
+      }
+      const nonce = nonceMatch[1];
+
+      // Verify message format: 'firmware:<project>:<version>:<sha256>:<nonce>'
+      const expectedMessage = `firmware:${project}:${version}:${sha256}:${nonce}`;
+      if (message !== expectedMessage) {
+        res.status(400).json({ error: 'Message format mismatch (expected firmware:<project>:<version>:<sha256>:<nonce>)' });
+        return;
+      }
+
+      const authResult = adminAuth.verifyAndBurnNonce(nonce, message, signature, adminAddresses);
+      if (!authResult.valid) {
+        res.status(403).json({ error: authResult.error || 'Signature verification failed' });
+        return;
+      }
+
+      // Check if version already exists
+      if (firmware.firmwareExists(project, version)) {
+        res.status(409).json({ error: 'Version already exists' });
+        return;
+      }
+
+      // Upload to R2
+      const r2Key = `firmware/${project}/${version}/firmware.bin`;
+      const url = await uploadToR2(r2Key, body, 'application/octet-stream', getFirmwareBucketName());
+      
+      if (!url) {
+        res.status(500).json({ error: 'R2 upload failed' });
+        return;
+      }
+
+      // Record metadata
+      const metadata = firmware.addFirmware(
+        project,
+        version,
+        sha256,
+        body.length,
+        r2Key,
+        url,
+        authResult.address,
+        true
+      );
+
+      res.json({
+        success: true,
+        project: metadata.project,
+        version: metadata.version,
+        sha256: metadata.sha256,
+        size: metadata.size,
+        url: metadata.url,
+        uploadedBy: metadata.uploadedBy,
+      });
+    } catch (err) {
+      console.error('[Firmware] Upload error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
   });
 
   // ========== Passkey / WebAuthn routes (GarageDoorKey wallet) ==========

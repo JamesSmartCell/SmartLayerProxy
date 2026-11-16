@@ -8,6 +8,11 @@ export interface Config {
   telemetryDbPath: string;
   telemetryRetentionDays: number;
   telemetryApiKey?: string;
+  telemetryAdminAddresses: string[];
+  adminAddresses: string[];
+  telemetryAckEnabled: boolean;
+  telemetryFeedMaxLimit: number;
+  firmwareUploadMaxSizeMb: number;
 }
 
 function loadProperties(): Record<string, string> {
@@ -40,6 +45,11 @@ function loadProperties(): Record<string, string> {
   return {};
 }
 
+function parseAddressList(value?: string): string[] {
+  if (!value) return [];
+  return value.split(',').map(a => a.trim()).filter(a => a.length > 0);
+}
+
 export function loadConfig(): Config {
   const props = loadProperties();
   return {
@@ -49,5 +59,18 @@ export function loadConfig(): Config {
     telemetryDbPath: process.env.TELEMETRY_DB_PATH || props['telemetry.db.path'] || './data/telemetry.db',
     telemetryRetentionDays: parseInt(process.env.TELEMETRY_RETENTION_DAYS || props['telemetry.retention.days'] || '30', 10),
     telemetryApiKey: process.env.TELEMETRY_API_KEY || props['telemetry.api.key'],
+    telemetryAdminAddresses: parseAddressList(
+      process.env.TELEMETRY_ADMIN_ADDRESSES || props['telemetry.admin.addresses']
+    ),
+    adminAddresses: parseAddressList(
+      process.env.ADMIN_ADDRESSES || props['admin.addresses']
+    ),
+    telemetryAckEnabled: (process.env.TELEMETRY_ACK_ENABLED || props['telemetry.ack.enabled'] || 'false').toLowerCase() === 'true',
+    telemetryFeedMaxLimit: parseInt(
+      process.env.TELEMETRY_FEED_MAX_LIMIT || props['telemetry.feed.max.limit'] || '5000', 10
+    ),
+    firmwareUploadMaxSizeMb: parseInt(
+      process.env.FIRMWARE_UPLOAD_MAX_SIZE_MB || props['firmware.upload.max.size.mb'] || '10', 10
+    ),
   };
 }
