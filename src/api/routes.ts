@@ -1,9 +1,11 @@
-import express, { Router, Request, Response } from 'express';
+import express, { Router, Request, Response, NextFunction } from 'express';
 import { ASyncService } from '../service/ASyncService';
 import { ASyncTCPService } from '../service/ASyncTCPService';
 import * as passkey from './passkey';
 import { uploadToR2, isR2Configured } from '../service/CloudflareR2';
 import { randomUUID } from 'crypto';
+import { TelemetryService } from '../service/TelemetryService';
+import { loadConfig } from '../config';
 
 const CHECK_CONNECTION_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -38,8 +40,28 @@ function parseQueryParams(req: Request): Record<string, string[]> {
   return params;
 }
 
+function telemetryAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const config = loadConfig();
+  
+  if (!config.telemetryApiKey) {
+    res.status(503).json({ error: 'Telemetry endpoints are disabled' });
+    return;
+  }
+
+  const authHeader = req.get('Authorization');
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+
+  if (!token || token !== config.telemetryApiKey) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  next();
+}
+
 export function createRouter(service: ASyncService, tcpService: ASyncTCPService): Router {
   const router = Router();
+  const telemetry = TelemetryService.getInstance();
 
   setInterval(() => service.checkServices(), CHECK_CONNECTION_INTERVAL_MS);
 
@@ -144,6 +166,97 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         return;
       }
       res.json(record);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  // ========== Telemetry routes (must come before catch-all device routes) ==========
+  router.get('/telemetry/system', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const since = req.query.since ? new Date(req.query.since as string).getTime() : undefined;
+      if (req.query.since && isNaN(since!)) {
+        res.status(400).json({ error: 'Invalid since timestamp' });
+        return;
+      }
+      const metrics = telemetry.getSystemMetrics(since);
+      res.json(metrics);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/telemetry/devices', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const since = req.query.since ? new Date(req.query.since as string).getTime() : undefined;
+      if (req.query.since && isNaN(since!)) {
+        res.status(400).json({ error: 'Invalid since timestamp' });
+        return;
+      }
+      const devices = telemetry.getAllDeviceMetrics(since);
+      res.json(devices);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/telemetry/devices/:address', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const address = normalizeAddress(req.params.address);
+      const since = req.query.since ? new Date(req.query.since as string).getTime() : undefined;
+      if (req.query.since && isNaN(since!)) {
+        res.status(400).json({ error: 'Invalid since timestamp' });
+        return;
+      }
+      const metrics = telemetry.getDeviceMetrics(address, since);
+      if (!metrics) {
+        res.status(404).json({ error: 'Device not found' });
+        return;
+      }
+      res.json(metrics);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/telemetry/methods', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 10;
+      const since = req.query.since ? new Date(req.query.since as string).getTime() : undefined;
+      if (req.query.since && isNaN(since!)) {
+        res.status(400).json({ error: 'Invalid since timestamp' });
+        return;
+      }
+      const methods = telemetry.getTopMethods(limit, since);
+      res.json(methods);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/telemetry/events', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const since = req.query.since ? new Date(req.query.since as string).getTime() : undefined;
+      if (req.query.since && isNaN(since!)) {
+        res.status(400).json({ error: 'Invalid since timestamp' });
+        return;
+      }
+      const device = req.query.device as string | undefined;
+      const limit = parseInt(req.query.limit as string) || 100;
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      if (limit < 1 || limit > 1000) {
+        res.status(400).json({ error: 'Limit must be between 1 and 1000' });
+        return;
+      }
+
+      const result = telemetry.getEvents({ since, device, limit, offset });
+      res.json(result);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Internal error' });
