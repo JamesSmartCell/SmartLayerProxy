@@ -5,6 +5,7 @@
  * Set env vars:
  *   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
  *   R2_PUBLIC_URL (e.g. https://pub-xxx.r2.dev or custom domain)
+ *   R2_FIRMWARE_BUCKET_NAME (optional, defaults to R2_BUCKET_NAME)
  */
 
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
@@ -14,6 +15,7 @@ const accountId = process.env.R2_ACCOUNT_ID || '';
 const accessKeyId = process.env.R2_ACCESS_KEY_ID || '';
 const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY || '';
 const bucketName = process.env.R2_BUCKET_NAME || 'garage-camera';
+const firmwareBucketName = process.env.R2_FIRMWARE_BUCKET_NAME || bucketName;
 const publicBaseUrl = process.env.R2_PUBLIC_URL || ''; // e.g. https://pub-xxx.r2.dev
 
 let s3Client: S3Client | null = null;
@@ -58,24 +60,34 @@ export async function createPresignedUploadUrl(key: string): Promise<string | nu
 
 /**
  * Upload buffer to R2 and return public URL
+ * @param key - Object key in R2
+ * @param body - Buffer to upload
+ * @param contentType - MIME type (default: 'image/jpeg' for backward compatibility with camera uploads)
+ * @param bucket - Optional bucket override (defaults to R2_BUCKET_NAME)
  */
-export async function uploadToR2(key: string, body: Buffer): Promise<string | null> {
+export async function uploadToR2(
+  key: string,
+  body: Buffer,
+  contentType = 'image/jpeg',
+  bucket?: string
+): Promise<string | null> {
   const client = getClient();
   if (!client) return null;
+  const targetBucket = bucket || bucketName;
   try {
     await client.send(
       new PutObjectCommand({
-        Bucket: bucketName,
+        Bucket: targetBucket,
         Key: key,
         Body: body,
-        ContentType: 'image/jpeg',
+        ContentType: contentType,
       })
     );
     if (publicBaseUrl) {
       const base = publicBaseUrl.replace(/\/$/, '');
       return `${base}/${key}`;
     }
-    return `https://${accountId}.r2.cloudflarestorage.com/${bucketName}/${key}`;
+    return `https://${accountId}.r2.cloudflarestorage.com/${targetBucket}/${key}`;
   } catch (err) {
     console.error('[R2] Upload error:', err);
     return null;
@@ -84,4 +96,8 @@ export async function uploadToR2(key: string, body: Buffer): Promise<string | nu
 
 export function isR2Configured(): boolean {
   return !!(accountId && accessKeyId && secretAccessKey);
+}
+
+export function getFirmwareBucketName(): string {
+  return firmwareBucketName;
 }

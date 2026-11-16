@@ -19,6 +19,7 @@ export interface DeviceEvent {
   apiSuccess?: boolean;
   apiResponseTime?: number;
   ipAddress?: string;
+  firmwareVersion?: string;
 }
 
 export interface DeviceMetrics {
@@ -38,6 +39,7 @@ export interface DeviceMetrics {
   disconnectsByReason: Record<DisconnectReason, number>;
   medianReconnectTime?: number;
   p95ReconnectTime?: number;
+  firmwareVersion?: string;
 }
 
 export interface SystemMetrics {
@@ -54,6 +56,7 @@ interface SessionInfo {
   connectTime: number;
   protocol: 'UDP' | 'TCP';
   ipAddress?: string;
+  firmwareVersion?: string;
 }
 
 export class TelemetryService {
@@ -104,12 +107,14 @@ export class TelemetryService {
         api_method TEXT,
         api_success INTEGER,
         api_response_time INTEGER,
-        ip_address TEXT
+        ip_address TEXT,
+        firmware_version TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_device_timestamp ON device_events(device, timestamp);
       CREATE INDEX IF NOT EXISTS idx_timestamp ON device_events(timestamp);
       CREATE INDEX IF NOT EXISTS idx_event_type ON device_events(event_type);
+      CREATE INDEX IF NOT EXISTS idx_id ON device_events(id);
     `);
   }
 
@@ -126,7 +131,7 @@ export class TelemetryService {
     }
   }
 
-  recordDeviceConnection(address: string, protocol: 'UDP' | 'TCP', ipAddress?: string): void {
+  recordDeviceConnection(address: string, protocol: 'UDP' | 'TCP', ipAddress?: string, firmwareVersion?: string): void {
     const normalized = address.toLowerCase();
     const now = Date.now();
 
@@ -134,13 +139,14 @@ export class TelemetryService {
       connectTime: now,
       protocol,
       ipAddress,
+      firmwareVersion,
     });
 
     const stmt = this.db.prepare(`
-      INSERT INTO device_events (timestamp, device, event_type, protocol, ip_address)
-      VALUES (?, ?, 'connect', ?, ?)
+      INSERT INTO device_events (timestamp, device, event_type, protocol, ip_address, firmware_version)
+      VALUES (?, ?, 'connect', ?, ?, ?)
     `);
-    stmt.run(now, normalized, protocol, ipAddress || null);
+    stmt.run(now, normalized, protocol, ipAddress || null, firmwareVersion || null);
   }
 
   recordDeviceDisconnect(address: string, reason: DisconnectReason): void {
@@ -258,6 +264,8 @@ export class TelemetryService {
         : connects[connects.length - 1].protocol as 'UDP' | 'TCP')
       : 'UDP';
 
+    const latestConnect = connects[connects.length - 1];
+
     return {
       address: normalized,
       connectionCount,
@@ -269,12 +277,13 @@ export class TelemetryService {
       methodUsage,
       avgResponseTime: apiCalls.length > 0 ? totalResponseTime / apiCalls.length : 0,
       protocol,
-      ipAddress: connects[connects.length - 1]?.ip_address,
+      ipAddress: latestConnect?.ip_address,
       uptimePercent: Math.min(100, uptimePercent),
       totalSessionDuration,
       disconnectsByReason,
       medianReconnectTime,
       p95ReconnectTime,
+      firmwareVersion: latestConnect?.firmware_version,
     };
   }
 
