@@ -4,8 +4,11 @@ import { createRouter } from './api/routes';
 import { ASyncService } from './service/ASyncService';
 import { ASyncTCPService } from './service/ASyncTCPService';
 import { loadConfig } from './config';
+import { TelemetryService } from './service/TelemetryService';
 
 const config = loadConfig();
+
+TelemetryService.getInstance(config.telemetryDbPath, config.telemetryRetentionDays);
 
 const app = express();
 const service = new ASyncService();

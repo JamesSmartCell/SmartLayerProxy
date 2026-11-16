@@ -3,6 +3,7 @@ import { UDPClientInstance } from './UDPClientInstance';
 import { ASyncService } from './ASyncService';
 import { MultiValueMap } from '../types';
 import { recoverAddressFromRawMessage } from '../crypto/signature';
+import { TelemetryService } from './TelemetryService';
 
 const CLIENT_REQUEST_AUTHENTICATION = 0;
 const CLIENT_AUTHENTICATION = 1;
@@ -25,6 +26,7 @@ export class UDPClient {
   private running = false;
   private port = 0;
   private service: ASyncService;
+  private telemetry = TelemetryService.getInstance();
 
   constructor(service: ASyncService) {
     this.service = service;
@@ -124,6 +126,7 @@ export class UDPClient {
               thisClient.validated = true;
               this.addToAddresses(recoveredAddr.toLowerCase(), thisClient);
               this.service.updateClientFromToken(BigInt('0x' + rcvSessionToken.toString('hex')), thisClient);
+              this.telemetry.recordDeviceConnection(recoveredAddr.toLowerCase(), 'UDP', address);
             }
             this.sendPacketToClient(thisClient, SIGNATURE_VALIDATE, thisClient.getSessionToken(), Buffer.alloc(0));
           }

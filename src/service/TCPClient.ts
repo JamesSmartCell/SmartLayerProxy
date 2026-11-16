@@ -11,7 +11,7 @@ export function normalizeRemoteIp(ip: string | undefined | null): string {
 
 export interface TCPCallback {
   receivedMessage(index: number, data: Buffer): void;
-  disconnect(index: number): void;
+  disconnect(index: number, reason: 'client_close' | 'socket_error' | 'terminated'): void;
 }
 
 export class TCPClient {
@@ -65,12 +65,12 @@ export class TCPClient {
 
     this.socket.on('close', () => {
       this.running = false;
-      this.serverCallback.disconnect(this.clientIndex);
+      this.serverCallback.disconnect(this.clientIndex, 'client_close');
     });
 
     this.socket.on('error', () => {
       this.running = false;
-      this.serverCallback.disconnect(this.clientIndex);
+      this.serverCallback.disconnect(this.clientIndex, 'socket_error');
     });
   }
 
