@@ -192,7 +192,7 @@ function generateMarkdownReport(analyses: Map<string, DeviceAnalysis>): string {
   md += `- Devices with auth failures: ${Array.from(analyses.values()).filter(a => a.authFailures > 0).length}\n\n`;
 
   md += '## Device Details\n\n';
-  for (const [device, analysis] of Array.from(analyses.entries()).sort((a, b) => {
+  for (const [device, analysis] of Array.from(analyses.entries()).sort((a: [string, DeviceAnalysis], b: [string, DeviceAnalysis]) => {
     if (a[1].reconnectStorm !== b[1].reconnectStorm) return a[1].reconnectStorm ? -1 : 1;
     return b[1].reconnectCount - a[1].reconnectCount;
   })) {
@@ -248,14 +248,15 @@ function findLatestFile(): string | null {
 }
 
 async function main() {
-  let inputFile = process.argv[2];
+  let inputFile: string | undefined = process.argv[2];
   
   if (!inputFile) {
-    inputFile = findLatestFile();
-    if (!inputFile) {
+    const latestFile = findLatestFile();
+    if (!latestFile) {
       console.error('Error: No telemetry file found. Run pull.ts first or specify a file.');
       process.exit(1);
     }
+    inputFile = latestFile;
     console.error(`Using latest file: ${inputFile}\n`);
   }
 
@@ -271,7 +272,7 @@ async function main() {
   }
 
   const analyses = new Map<string, DeviceAnalysis>();
-  for (const [device, devEvents] of deviceEvents.entries()) {
+  for (const [device, devEvents] of Array.from(deviceEvents.entries())) {
     analyses.set(device, analyzeDevice(devEvents.sort((a, b) => a.timestamp - b.timestamp)));
   }
 

@@ -44,7 +44,7 @@ async function fetchFeed(afterId: number, limit = 1000): Promise<FeedResponse> {
     throw new Error(`Feed request failed: ${response.status} ${response.statusText}`);
   }
 
-  return response.json();
+  return response.json() as Promise<FeedResponse>;
 }
 
 async function acknowledgeEvents(upToId: number, dryRun: boolean): Promise<any> {
@@ -57,7 +57,7 @@ async function acknowledgeEvents(upToId: number, dryRun: boolean): Promise<any> 
   if (!challengeResp.ok) {
     throw new Error(`Challenge request failed: ${challengeResp.status}`);
   }
-  const { nonce } = await challengeResp.json();
+  const { nonce } = await challengeResp.json() as { nonce: string };
 
   // Sign message: 'ack:<upToId>:<nonce>'
   const wallet = new Wallet(TELEMETRY_ADMIN_KEY);
@@ -84,7 +84,7 @@ async function acknowledgeEvents(upToId: number, dryRun: boolean): Promise<any> 
     throw new Error(`Ack request failed: ${ackResp.status} - ${error}`);
   }
 
-  return ackResp.json();
+  return ackResp.json() as Promise<any>;
 }
 
 async function main() {
