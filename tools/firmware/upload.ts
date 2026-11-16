@@ -33,7 +33,7 @@ async function getChallenge(): Promise<string> {
   if (!response.ok) {
     throw new Error(`Challenge request failed: ${response.status} ${response.statusText}`);
   }
-  const { nonce } = await response.json();
+  const { nonce } = await response.json() as { nonce: string };
   return nonce;
 }
 
@@ -71,7 +71,7 @@ async function uploadFirmware(
     headers: {
       'Content-Type': 'application/octet-stream',
     },
-    body: firmwareBuffer,
+    body: new Uint8Array(firmwareBuffer),
   });
 
   if (!response.ok) {
@@ -79,7 +79,7 @@ async function uploadFirmware(
     throw new Error(`Upload failed: ${response.status} - ${error}`);
   }
 
-  return response.json();
+  return response.json() as Promise<any>;
 }
 
 async function main() {

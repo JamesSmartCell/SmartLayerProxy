@@ -10,7 +10,8 @@
     "clean": "rimraf dist",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "typecheck:tools": "tsc --project tsconfig.tools.json --noEmit"
   },
   "engines": {
     "node": ">=20.0.0"

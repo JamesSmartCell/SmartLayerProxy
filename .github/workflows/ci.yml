@@ -34,6 +34,9 @@ jobs:
     - name: Check for TypeScript errors
       run: npx tsc --noEmit
     
+    - name: Check tools TypeScript errors
+      run: npm run typecheck:tools
+    
     - name: Run tests
       run: npm test
       env:
