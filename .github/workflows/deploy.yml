@@ -15,6 +15,6 @@ jobs:
           git pull --ff-only
           npm ci
           npm run build
-          sudo systemctl restart smartlayer-proxy
+          sudo systemctl restart scriptproxy
       - name: Health check
-        run: sleep 3 && systemctl is-active smartlayer-proxy
+        run: sleep 3 && systemctl is-active scriptproxy
