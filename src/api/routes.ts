@@ -614,6 +614,38 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
     }
   });
 
+  router.get('/telemetry/devices/silent', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const cadenceMultiplier = req.query.cadenceMultiplier 
+        ? parseFloat(req.query.cadenceMultiplier as string)
+        : 3;
+      const minSilenceMs = req.query.minSilenceMs
+        ? parseInt(req.query.minSilenceMs as string)
+        : 15 * 60 * 1000;
+      const includeRetired = req.query.includeRetired === 'true';
+
+      if (cadenceMultiplier < 0 || minSilenceMs < 0) {
+        res.status(400).json({ error: 'Invalid parameters' });
+        return;
+      }
+
+      const silentDevices = telemetry.getSilentDevices({
+        cadenceMultiplier,
+        minSilenceMs,
+        includeRetired,
+      });
+
+      res.json({ 
+        devices: silentDevices,
+        params: { cadenceMultiplier, minSilenceMs, includeRetired },
+        serverTime: Date.now(),
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
   router.get('/telemetry/devices/:address', telemetryAuthMiddleware, (req, res) => {
     try {
       const address = normalizeAddress(req.params.address);
@@ -668,38 +700,6 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
 
       const result = telemetry.getEvents({ since, device, limit, offset });
       res.json(result);
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: 'Internal error' });
-    }
-  });
-
-  router.get('/telemetry/devices/silent', telemetryAuthMiddleware, (req, res) => {
-    try {
-      const cadenceMultiplier = req.query.cadenceMultiplier 
-        ? parseFloat(req.query.cadenceMultiplier as string)
-        : 3;
-      const minSilenceMs = req.query.minSilenceMs
-        ? parseInt(req.query.minSilenceMs as string)
-        : 15 * 60 * 1000;
-      const includeRetired = req.query.includeRetired === 'true';
-
-      if (cadenceMultiplier < 0 || minSilenceMs < 0) {
-        res.status(400).json({ error: 'Invalid parameters' });
-        return;
-      }
-
-      const silentDevices = telemetry.getSilentDevices({
-        cadenceMultiplier,
-        minSilenceMs,
-        includeRetired,
-      });
-
-      res.json({ 
-        devices: silentDevices,
-        params: { cadenceMultiplier, minSilenceMs, includeRetired },
-        serverTime: Date.now(),
-      });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Internal error' });
