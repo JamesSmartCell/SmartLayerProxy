@@ -42,6 +42,33 @@ export interface DeviceMetrics {
   firmwareVersion?: string;
 }
 
+export interface DeviceDiagnostics {
+  id: number;
+  timestamp: number;
+  device: string;
+  resetReason?: string;
+  bootCount?: number;
+  wifiAttempts?: number;
+  connectTimeMs?: number;
+  networkIndex?: number;
+  lastFailureStage?: string;
+  wifiDisconnectReason?: string;
+}
+
+export interface SilentDevice {
+  address: string;
+  firstSeen: number;
+  lastSeen: number;
+  lastFirmwareVersion?: string;
+  lastDisconnectReason?: DisconnectReason;
+  medianReconnectGapMs?: number;
+  silentDurationMs: number;
+  expectedReconnectMs: number;
+  lastEvents: DeviceEvent[];
+  lastDiagnostics?: DeviceDiagnostics;
+  retired: boolean;
+}
+
 export interface SystemMetrics {
   totalDevices: number;
   totalApiCalls: number;
@@ -115,6 +142,30 @@ export class TelemetryService {
       CREATE INDEX IF NOT EXISTS idx_timestamp ON device_events(timestamp);
       CREATE INDEX IF NOT EXISTS idx_event_type ON device_events(event_type);
       CREATE INDEX IF NOT EXISTS idx_id ON device_events(id);
+
+      CREATE TABLE IF NOT EXISTS device_diagnostics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp INTEGER NOT NULL,
+        device TEXT NOT NULL,
+        reset_reason TEXT,
+        boot_count INTEGER,
+        wifi_attempts INTEGER,
+        connect_time_ms INTEGER,
+        network_index INTEGER,
+        last_failure_stage TEXT,
+        wifi_disconnect_reason TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_diagnostics_device ON device_diagnostics(device, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_diagnostics_timestamp ON device_diagnostics(timestamp);
+
+      CREATE TABLE IF NOT EXISTS device_registry (
+        device TEXT PRIMARY KEY,
+        retired INTEGER DEFAULT 0,
+        first_seen INTEGER,
+        last_seen INTEGER,
+        notes TEXT
+      );
     `);
 
     // Migrate schema: add missing columns (idempotent)
@@ -175,6 +226,19 @@ export class TelemetryService {
       VALUES (?, ?, 'connect', ?, ?, ?)
     `);
     stmt.run(now, normalized, protocol, ipAddress || null, firmwareVersion || null);
+
+    this.updateDeviceRegistry(normalized, now);
+  }
+
+  private updateDeviceRegistry(device: string, timestamp: number): void {
+    const existing = this.db.prepare('SELECT * FROM device_registry WHERE device = ?').get(device) as any;
+    
+    if (existing) {
+      this.db.prepare('UPDATE device_registry SET last_seen = ? WHERE device = ?').run(timestamp, device);
+    } else {
+      this.db.prepare('INSERT INTO device_registry (device, first_seen, last_seen, retired) VALUES (?, ?, ?, 0)')
+        .run(device, timestamp, timestamp);
+    }
   }
 
   recordDeviceDisconnect(address: string, reason: DisconnectReason): void {
@@ -424,12 +488,159 @@ export class TelemetryService {
     };
   }
 
+  recordDeviceDiagnostics(
+    address: string,
+    diagnostics: {
+      resetReason?: string;
+      bootCount?: number;
+      wifiAttempts?: number;
+      connectTimeMs?: number;
+      networkIndex?: number;
+      lastFailureStage?: string;
+      wifiDisconnectReason?: string;
+    }
+  ): void {
+    const normalized = address.toLowerCase();
+    const now = Date.now();
+
+    const stmt = this.db.prepare(`
+      INSERT INTO device_diagnostics (
+        timestamp, device, reset_reason, boot_count, wifi_attempts,
+        connect_time_ms, network_index, last_failure_stage, wifi_disconnect_reason
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    
+    stmt.run(
+      now,
+      normalized,
+      diagnostics.resetReason ?? null,
+      diagnostics.bootCount ?? null,
+      diagnostics.wifiAttempts ?? null,
+      diagnostics.connectTimeMs ?? null,
+      diagnostics.networkIndex ?? null,
+      diagnostics.lastFailureStage ?? null,
+      diagnostics.wifiDisconnectReason ?? null
+    );
+  }
+
+  getLatestDiagnostics(address: string): DeviceDiagnostics | undefined {
+    const normalized = address.toLowerCase();
+    const row = this.db.prepare(`
+      SELECT
+        id, timestamp, device,
+        reset_reason as resetReason,
+        boot_count as bootCount,
+        wifi_attempts as wifiAttempts,
+        connect_time_ms as connectTimeMs,
+        network_index as networkIndex,
+        last_failure_stage as lastFailureStage,
+        wifi_disconnect_reason as wifiDisconnectReason
+      FROM device_diagnostics
+      WHERE device = ?
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `).get(normalized) as any;
+
+    return row || undefined;
+  }
+
+  getSilentDevices(options: {
+    cadenceMultiplier?: number;
+    minSilenceMs?: number;
+    includeRetired?: boolean;
+  } = {}): SilentDevice[] {
+    const {
+      cadenceMultiplier = 3,
+      minSilenceMs = 15 * 60 * 1000,
+      includeRetired = false,
+    } = options;
+
+    const now = Date.now();
+    const devices: SilentDevice[] = [];
+
+    const registryFilter = includeRetired ? '' : 'WHERE retired = 0';
+    const registryDevices = this.db.prepare(`
+      SELECT device, first_seen, last_seen, retired FROM device_registry ${registryFilter}
+    `).all() as any[];
+
+    for (const reg of registryDevices) {
+      const device = reg.device;
+      const lastSeen = reg.last_seen;
+      const silentDurationMs = now - lastSeen;
+
+      const metrics = this.getDeviceMetrics(device);
+      if (!metrics) continue;
+
+      const medianGap = metrics.medianReconnectTime || 0;
+      const expectedReconnect = Math.max(medianGap * cadenceMultiplier, minSilenceMs);
+
+      if (silentDurationMs > expectedReconnect) {
+        const lastDisconnect = this.db.prepare(`
+          SELECT disconnect_reason FROM device_events
+          WHERE device = ? AND event_type = 'disconnect'
+          ORDER BY timestamp DESC LIMIT 1
+        `).get(device) as any;
+
+        const lastEvents = this.db.prepare(`
+          SELECT
+            id, timestamp, device, event_type as eventType, protocol,
+            disconnect_reason as disconnectReason, api_method as apiMethod,
+            api_success as apiSuccess, api_response_time as apiResponseTime,
+            ip_address as ipAddress, firmware_version as firmwareVersion
+          FROM device_events
+          WHERE device = ?
+          ORDER BY timestamp DESC LIMIT 10
+        `).all(device) as any[];
+
+        const lastDiagnostics = this.getLatestDiagnostics(device);
+
+        devices.push({
+          address: device,
+          firstSeen: reg.first_seen,
+          lastSeen: lastSeen,
+          lastFirmwareVersion: metrics.firmwareVersion || undefined,
+          lastDisconnectReason: lastDisconnect?.disconnect_reason,
+          medianReconnectGapMs: medianGap || undefined,
+          silentDurationMs,
+          expectedReconnectMs: expectedReconnect,
+          lastEvents: lastEvents.map(e => ({
+            ...e,
+            apiSuccess: e.apiSuccess !== null && e.apiSuccess !== undefined ? e.apiSuccess === 1 : undefined,
+          })),
+          lastDiagnostics,
+          retired: reg.retired === 1,
+        });
+      }
+    }
+
+    return devices.sort((a, b) => b.silentDurationMs - a.silentDurationMs);
+  }
+
+  markDeviceRetired(address: string, retired: boolean, notes?: string): void {
+    const normalized = address.toLowerCase();
+    
+    const existing = this.db.prepare('SELECT * FROM device_registry WHERE device = ?').get(normalized);
+    
+    if (existing) {
+      const stmt = this.db.prepare('UPDATE device_registry SET retired = ?, notes = ? WHERE device = ?');
+      stmt.run(retired ? 1 : 0, notes || null, normalized);
+    } else {
+      const now = Date.now();
+      const stmt = this.db.prepare(
+        'INSERT INTO device_registry (device, retired, notes, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)'
+      );
+      stmt.run(normalized, retired ? 1 : 0, notes || null, now, now);
+    }
+  }
+
   close(): void {
     this.db.close();
   }
 
   reset(): void {
     this.db.exec('DELETE FROM device_events');
+    this.db.exec('DELETE FROM device_diagnostics');
+    this.db.exec('DELETE FROM device_registry');
     this.activeSessions.clear();
     this.systemStartTime = Date.now();
   }

@@ -14,6 +14,76 @@ const UNAUTH_GRACE_MS = 30 * 1000;
 const MAX_TCP_CLIENTS = 64;
 const HEX_RE = /^[0-9a-fA-F]*$/;
 
+const OPCODE_AUTH_LEGACY = 0x07;
+const OPCODE_AUTH_WITH_VERSION = 0x09;
+const OPCODE_WIFI_DIAGNOSTICS = 0x0A;
+const MAX_FIRMWARE_VERSION_LEN = 32;
+
+function decodeEspResetReason(code: number): string {
+  const reasons: Record<number, string> = {
+    1: 'POWERON',
+    2: 'EXT',
+    3: 'SW',
+    4: 'PANIC',
+    5: 'INT_WDT',
+    6: 'TASK_WDT',
+    7: 'WDT',
+    8: 'DEEPSLEEP',
+    9: 'BROWNOUT',
+    10: 'SDIO',
+  };
+  return reasons[code] || `UNKNOWN(${code})`;
+}
+
+function decodeFailureStage(code: number): string {
+  const stages: Record<number, string> = {
+    0: 'none',
+    1: 'wifi_assoc',
+    2: 'wifi_auth',
+    3: 'dhcp',
+    4: 'dns',
+    5: 'tls',
+    6: 'proxy_connect',
+  };
+  return stages[code] || `unknown(${code})`;
+}
+
+function decodeWifiDisconnectReason(code: number): string {
+  const reasons: Record<number, string> = {
+    1: 'UNSPECIFIED',
+    2: 'AUTH_EXPIRE',
+    3: 'AUTH_LEAVE',
+    4: 'ASSOC_EXPIRE',
+    5: 'ASSOC_TOOMANY',
+    6: 'NOT_AUTHED',
+    7: 'NOT_ASSOCED',
+    8: 'ASSOC_LEAVE',
+    9: 'ASSOC_NOT_AUTHED',
+    10: 'DISASSOC_PWRCAP_BAD',
+    11: 'DISASSOC_SUPCHAN_BAD',
+    13: 'IE_INVALID',
+    14: 'MIC_FAILURE',
+    15: 'FOURWAY_HANDSHAKE_TIMEOUT',
+    16: 'GROUP_KEY_UPDATE_TIMEOUT',
+    17: 'IE_IN_4WAY_DIFFERS',
+    18: 'GROUP_CIPHER_INVALID',
+    19: 'PAIRWISE_CIPHER_INVALID',
+    20: 'AKMP_INVALID',
+    21: 'UNSUPP_RSN_IE_VERSION',
+    22: 'INVALID_RSN_IE_CAP',
+    23: 'IEEE_802_1X_AUTH_FAILED',
+    24: 'CIPHER_SUITE_REJECTED',
+    200: 'BEACON_TIMEOUT',
+    201: 'NO_AP_FOUND',
+    202: 'AUTH_FAIL',
+    203: 'ASSOC_FAIL',
+    204: 'HANDSHAKE_TIMEOUT',
+    205: 'CONNECTION_FAIL',
+    206: 'AP_TSF_RESET',
+  };
+  return reasons[code] || `unknown(${code})`;
+}
+
 function createChallenge(): Buffer {
   return Buffer.from(require('crypto').randomBytes(16));
 }
@@ -204,21 +274,54 @@ export class ASyncTCPService implements TCPCallback {
       case 0x02:
         return;
       case 0x03:
-      case 0x07: {
-        if (message.length < 85) {
-          this.dropUnauth(client, index, 'short auth');
-          return;
+      case OPCODE_AUTH_LEGACY:
+      case OPCODE_AUTH_WITH_VERSION: {
+        let firmwareVersion: string | undefined = undefined;
+        let preimage: Buffer;
+        
+        if (opcode === OPCODE_AUTH_WITH_VERSION) {
+          if (message.length < 86) {
+            this.dropUnauth(client, index, 'short auth with version');
+            return;
+          }
+          const versionLen = message[85];
+          if (versionLen > MAX_FIRMWARE_VERSION_LEN) {
+            this.dropUnauth(client, index, 'version length exceeds max');
+            return;
+          }
+          if (message.length < 86 + versionLen) {
+            this.dropUnauth(client, index, 'truncated version');
+            return;
+          }
+          const versionBytes = message.subarray(86, 86 + versionLen);
+          firmwareVersion = versionBytes.toString('utf-8');
+          
+          const challenge = client.getChallenge();
+          if (!challenge.length) {
+            this.dropUnauth(client, index, 'auth before challenge');
+            return;
+          }
+          
+          preimage = Buffer.concat([challenge, Buffer.from([versionLen]), versionBytes]);
+        } else {
+          if (message.length < 85) {
+            this.dropUnauth(client, index, 'short auth');
+            return;
+          }
+          const challenge = client.getChallenge();
+          if (!challenge.length) {
+            this.dropUnauth(client, index, 'auth before challenge');
+            return;
+          }
+          preimage = challenge;
         }
+        
         const addrBytes = message.subarray(0, 20);
         const sig = message.subarray(20, 85);
-        const challenge = client.getChallenge();
-        if (!challenge.length) {
-          this.dropUnauth(client, index, 'auth before challenge');
-          return;
-        }
+        
         let recoveredAddr = '';
         try {
-          const msgHash = opcode === 0x03 ? getEthereumMessageHash(challenge) : ethers.keccak256(challenge);
+          const msgHash = opcode === 0x03 ? getEthereumMessageHash(preimage) : ethers.keccak256(preimage);
           recoveredAddr = recoverAddressFromSignature(msgHash, new Uint8Array(sig));
         } catch (err) {
           console.error('Recover failed #' + index, err instanceof Error ? err.message : err);
@@ -242,17 +345,57 @@ export class ASyncTCPService implements TCPCallback {
             return;
           }
           if (authed && client.getAddress().toLowerCase() === addrLower) {
-            console.log('Refresh auth #' + index, addrLower);
+            console.log('Refresh auth #' + index, addrLower, firmwareVersion ? `fw:${firmwareVersion}` : '');
             this.touchPin(addrLower, ip);
             return;
           }
           client.setAddress(recoveredAddr);
           this.addToClientMap(recoveredAddr, index);
           this.touchPin(addrLower, ip);
-          this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip);
+          this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip, firmwareVersion);
           return;
         }
         this.dropUnauth(client, index, 'bad signature');
+        return;
+      }
+      case OPCODE_WIFI_DIAGNOSTICS: {
+        if (!authed) {
+          console.log('Ignore diagnostics from unauthenticated #' + index);
+          return;
+        }
+        if (message.length < 13) {
+          console.log('Short diagnostics packet #' + index, message.length, 'bytes');
+          return;
+        }
+        
+        const resetReason = message[0];
+        const bootCount = message.readUInt16BE(1);
+        const wifiAttempts = message.readUInt16BE(3);
+        const connectTimeMs = message.readUInt32BE(5);
+        const networkIndex = message[9];
+        const lastFailureStage = message[10];
+        const lastDisconnectReason = message[11];
+        
+        const addr = client.getAddress().toLowerCase();
+        console.log(
+          'WiFi diagnostics #' + index, addr,
+          'reset:', decodeEspResetReason(resetReason),
+          'boots:', bootCount,
+          'wifiAttempts:', wifiAttempts,
+          'connectMs:', connectTimeMs,
+          'failStage:', decodeFailureStage(lastFailureStage),
+          'wifiDisc:', decodeWifiDisconnectReason(lastDisconnectReason)
+        );
+        
+        this.telemetry.recordDeviceDiagnostics(addr, {
+          resetReason: decodeEspResetReason(resetReason),
+          bootCount,
+          wifiAttempts,
+          connectTimeMs,
+          networkIndex,
+          lastFailureStage: decodeFailureStage(lastFailureStage),
+          wifiDisconnectReason: decodeWifiDisconnectReason(lastDisconnectReason),
+        });
         return;
       }
       case 0x04:
