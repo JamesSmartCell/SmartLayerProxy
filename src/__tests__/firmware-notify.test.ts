@@ -294,4 +294,61 @@ describe('Firmware Notify API', () => {
     expect(response.body.notified[0].address).toBe('0xaaa');
     expect(notifiedDevices).toEqual(['0xaaa']);
   });
+
+  it('should handle version comparison with different formats', async () => {
+    const firmware = FirmwareService.getInstance(TEST_FIRMWARE_DB);
+    firmware.addFirmware('garagedoor', '1.2.0', 'hash', 1024, 'key', 'url');
+
+    const notifiedDevices: string[] = [];
+    const mockTcpService = {
+      getConnectedDevices: () => [
+        { address: '0xaaa', project: 'garagedoor', semver: '1.0.0' },
+      ],
+      sendApiCallToDevice: async (address: string) => {
+        notifiedDevices.push(address);
+      },
+    } as unknown as ASyncTCPService;
+
+    const router = createRouter({} as ASyncService, mockTcpService);
+    const testApp = express();
+    testApp.use('/api', router);
+
+    const { message, signature } = await signNotifyRequest('garagedoor');
+
+    const response = await request(testApp)
+      .post('/api/firmware/garagedoor/notify')
+      .send({ message, signature })
+      .expect(200);
+
+    expect(response.body.notified.length).toBe(1);
+    expect(notifiedDevices).toContain('0xaaa');
+  });
+
+  it('should reject when latest version format is invalid', async () => {
+    const firmware = FirmwareService.getInstance(TEST_FIRMWARE_DB);
+    const db = (firmware as any).db;
+    db.prepare('INSERT INTO firmware (project, version, sha256, size, r2_key, url, uploaded_at, is_current) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      'garagedoor', 'invalid-version', 'hash', 1024, 'key', 'url', Date.now(), 1
+    );
+
+    const mockTcpService = {
+      getConnectedDevices: () => [
+        { address: '0xaaa', project: 'garagedoor', semver: '1.0.0' },
+      ],
+      sendApiCallToDevice: async () => {},
+    } as unknown as ASyncTCPService;
+
+    const router = createRouter({} as ASyncService, mockTcpService);
+    const testApp = express();
+    testApp.use('/api', router);
+
+    const { message, signature } = await signNotifyRequest('garagedoor');
+
+    const response = await request(testApp)
+      .post('/api/firmware/garagedoor/notify')
+      .send({ message, signature })
+      .expect(500);
+
+    expect(response.body.error).toContain('invalid');
+  });
 });

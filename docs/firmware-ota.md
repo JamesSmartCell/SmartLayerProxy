@@ -12,6 +12,8 @@ The OTA update flow consists of three main steps:
 
 ## Firmware Version Format
 
+### Device Firmware Version String
+
 New-style firmware must report its version in the TCP login (opcode 0x09) using this format:
 
 ```
@@ -24,10 +26,26 @@ New-style firmware must report its version in the TCP login (opcode 0x09) using 
 
 **Components:**
 - `project`: Lowercase project identifier (alphanumeric, hyphens, underscores)
-- `semver`: Semantic version (MAJOR.MINOR.PATCH)
+- `semver`: Semantic version (MAJOR.MINOR.PATCH) - **must match uploaded version exactly**
 - `hash`: Optional git short hash or build identifier
 
 **Legacy firmware** (using opcode 0x07 or other version strings) is not notified and continues to work unchanged.
+
+### Upload Version Format
+
+When uploading firmware via the API or CLI tool, the version parameter must be **plain semver only**:
+
+**✅ Correct:**
+- `1.2.3`
+- `0.5.1`
+- `10.20.30`
+
+**❌ Incorrect:**
+- `v1.2.3` (no v prefix)
+- `1.2.3+abc123` (no build suffix)
+- `garagedoor@1.2.3` (no project prefix)
+
+The uploaded version is stored in the database and compared with device semver during notifications. The comparison logic extracts MAJOR.MINOR.PATCH from any format, but uploads must use plain semver to ensure consistent storage.
 
 ## API Endpoints
 
@@ -53,7 +71,12 @@ This endpoint is called by devices to check for updates and download the firmwar
 Upload a new firmware binary (admin authentication required).
 
 **Query Parameters:**
-- `version` (required): Semantic version string (e.g., `1.2.3`)
+- `version` (required): **Plain semver MAJOR.MINOR.PATCH only** (e.g., `1.2.3`). Must NOT include:
+  - Project name prefix (not `garagedoor@1.2.3`)
+  - `v` prefix (not `v1.2.3`)
+  - Build suffix (not `1.2.3+abc123`)
+  
+  **Important:** This version must match the `FIRMWARE_SEMVER` constant in your device firmware exactly.
 - `signature` (required): Admin signature
 - `message` (required): Signed message in format `firmware:<project>:<version>:<sha256>:<nonce>`
 - `notify` (optional): If `true`, automatically notify connected devices after upload
@@ -217,11 +240,23 @@ The `FIRMWARE_ADMIN_KEY` is an Ethereum private key that must be in the configur
 
 ### 1. Build and Test Firmware
 
-Build your firmware binary and ensure it reports the correct version string in the TCP login:
+Build your firmware binary and ensure it reports the correct version string in the TCP login.
+
+**Define version constants in your firmware:**
 
 ```cpp
-String version = "garagedoor@1.2.0+ab12cd3";
+#define FIRMWARE_PROJECT "garagedoor"
+#define FIRMWARE_SEMVER "1.2.0"
+#define FIRMWARE_HASH "ab12cd3"
+
+// Construct full version string for login
+String firmwareVersion = String(FIRMWARE_PROJECT) + "@" + 
+                        String(FIRMWARE_SEMVER) + "+" + 
+                        String(FIRMWARE_HASH);
+// Result: "garagedoor@1.2.0+ab12cd3"
 ```
+
+**Important:** The `FIRMWARE_SEMVER` value (e.g., `"1.2.0"`) must match the version you pass to the upload tool exactly.
 
 ### 2. Upload Firmware
 
@@ -369,6 +404,7 @@ Check:
 2. Device project matches the uploaded firmware project
 3. Device version is older than the latest (unless using `force: true`)
 4. Device is connected to the TCP proxy (check telemetry)
+5. Uploaded version is plain semver (not `v1.2.3` or `1.2.3+hash`)
 
 ### Update Failed
 
@@ -381,6 +417,28 @@ Check:
 ### Version Parsing Failed
 
 Check:
-1. Version string format is exactly `<project>@<semver>+<hash>`
+1. Device version string format is exactly `<project>@<semver>+<hash>`
 2. Semver uses three numbers (e.g., `1.2.3`, not `1.2`)
 3. Project name is alphanumeric with hyphens/underscores only
+4. Upload version is plain semver MAJOR.MINOR.PATCH (reject at upload if invalid)
+
+### Upload Rejected: Invalid Version
+
+If upload fails with "Version must be plain semver MAJOR.MINOR.PATCH":
+
+**Fix your upload command:**
+```bash
+# ❌ Wrong
+npm run firmware:upload garagedoor v1.2.0 firmware.bin
+npm run firmware:upload garagedoor 1.2.0+abc firmware.bin
+npm run firmware:upload garagedoor garagedoor@1.2.0 firmware.bin
+
+# ✅ Correct
+npm run firmware:upload garagedoor 1.2.0 firmware.bin
+```
+
+**Ensure device firmware matches:**
+```cpp
+// In your device code, FIRMWARE_SEMVER must match upload version
+#define FIRMWARE_SEMVER "1.2.0"  // Must match: 1.2.0
+```

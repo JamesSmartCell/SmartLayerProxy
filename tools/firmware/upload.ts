@@ -106,6 +106,10 @@ async function uploadFirmware(
   return response.json() as Promise<any>;
 }
 
+function validatePlainSemver(version: string): boolean {
+  return /^\d+\.\d+\.\d+$/.test(version);
+}
+
 async function main() {
   const args = process.argv.slice(2);
   
@@ -113,6 +117,10 @@ async function main() {
     console.error('Usage: ts-node upload.ts <project> <version> <firmware.bin> [--notify]');
     console.error('Example: ts-node upload.ts GarageDoor 1.2.3 firmware.bin');
     console.error('         ts-node upload.ts GarageDoor 1.2.3 firmware.bin --notify');
+    console.error('');
+    console.error('Version must be plain semver MAJOR.MINOR.PATCH (e.g., 1.2.3)');
+    console.error('Do not include project name, v prefix, or build suffix');
+    console.error('This version must match the FIRMWARE_SEMVER in your device firmware');
     process.exit(1);
   }
 
@@ -122,6 +130,18 @@ async function main() {
 
   if (!FIRMWARE_ADMIN_KEY) {
     console.error('Error: FIRMWARE_ADMIN_KEY not set in .env');
+    process.exit(1);
+  }
+
+  if (!validatePlainSemver(version)) {
+    console.error(`Error: Version "${version}" is not valid plain semver`);
+    console.error('Version must be MAJOR.MINOR.PATCH (e.g., 1.2.3)');
+    console.error('Do not include:');
+    console.error('  - Project name (not "garagedoor@1.2.3")');
+    console.error('  - v prefix (not "v1.2.3")');
+    console.error('  - Build suffix (not "1.2.3+abc123")');
+    console.error('');
+    console.error('This version must match the FIRMWARE_SEMVER constant in your device firmware.');
     process.exit(1);
   }
 

@@ -385,13 +385,14 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
       if (shouldNotify) {
         try {
           const latest = firmware.getLatestFirmware(project);
-          if (latest) {
+          if (latest && FirmwareVersionParser.extractSemver(latest.version)) {
             const connectedDevices = tcpService.getConnectedDevices();
             const notified: Array<{ address: string; version: string }> = [];
             
             for (const device of connectedDevices) {
               if (device.project?.toLowerCase() === project.toLowerCase() && device.semver) {
-                if (FirmwareVersionParser.isOlder(device.semver, latest.version)) {
+                const isOlderResult = FirmwareVersionParser.isOlder(device.semver, latest.version);
+                if (isOlderResult === true) {
                   await tcpService.sendApiCallToDevice(device.address, 'updateReady', {});
                   notified.push({ address: device.address, version: device.semver });
                   telemetry.recordFirmwareNotify(device.address, project, latest.version);
@@ -464,6 +465,12 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         return;
       }
 
+      const latestSemver = FirmwareVersionParser.extractSemver(latest.version);
+      if (!latestSemver) {
+        res.status(500).json({ error: 'Latest version format is invalid, cannot compare versions' });
+        return;
+      }
+
       const connectedDevices = tcpService.getConnectedDevices();
       
       const notified: Array<{ address: string; version: string }> = [];
@@ -488,7 +495,14 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
           continue;
         }
 
-        const shouldNotify = force || FirmwareVersionParser.isOlder(device.semver, latest.version);
+        const isOlderResult = FirmwareVersionParser.isOlder(device.semver, latest.version);
+        
+        if (isOlderResult === null) {
+          skipped.push({ address: device.address, reason: 'version comparison failed' });
+          continue;
+        }
+        
+        const shouldNotify = force || isOlderResult;
         
         if (!shouldNotify) {
           skipped.push({ address: device.address, reason: 'already up to date' });
@@ -539,6 +553,13 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
 
       if (!version) {
         res.status(400).json({ error: 'Missing version query parameter' });
+        return;
+      }
+
+      if (!FirmwareVersionParser.isPlainSemver(version)) {
+        res.status(400).json({ 
+          error: 'Version must be plain semver MAJOR.MINOR.PATCH (e.g., 1.2.3). Do not include project name, v prefix, or build suffix. This version must match the FIRMWARE_SEMVER in your device firmware.' 
+        });
         return;
       }
 
@@ -619,7 +640,8 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
           
           for (const device of connectedDevices) {
             if (device.project?.toLowerCase() === project.toLowerCase() && device.semver) {
-              if (FirmwareVersionParser.isOlder(device.semver, version)) {
+              const isOlderResult = FirmwareVersionParser.isOlder(device.semver, version);
+              if (isOlderResult === true) {
                 await tcpService.sendApiCallToDevice(device.address, 'updateReady', {});
                 notified.push({ address: device.address, version: device.semver });
                 telemetry.recordFirmwareNotify(device.address, project, version);

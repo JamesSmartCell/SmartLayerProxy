@@ -273,5 +273,82 @@ describe('Firmware API', () => {
         .send(Buffer.alloc(0))
         .expect(400);
     });
+
+    it('should reject version with v prefix', async () => {
+      const firmware = Buffer.from('fake firmware data');
+      const sha256 = createHash('sha256').update(firmware).digest('hex');
+
+      const challengeResp = await request(app).get('/api/admin/challenge').expect(200);
+      const { nonce } = challengeResp.body;
+
+      const message = `firmware:GarageDoor:v1.0.0:${sha256}:${nonce}`;
+      const signature = await wallet.signMessage(message);
+
+      const response = await request(app)
+        .post(`/api/firmware/GarageDoor?version=v1.0.0&signature=${encodeURIComponent(signature)}&message=${encodeURIComponent(message)}`)
+        .set('Content-Type', 'application/octet-stream')
+        .send(firmware)
+        .expect(400);
+
+      expect(response.body.error).toContain('plain semver');
+    });
+
+    it('should reject version with build suffix', async () => {
+      const firmware = Buffer.from('fake firmware data');
+      const sha256 = createHash('sha256').update(firmware).digest('hex');
+
+      const challengeResp = await request(app).get('/api/admin/challenge').expect(200);
+      const { nonce } = challengeResp.body;
+
+      const message = `firmware:GarageDoor:1.0.0+abc123:${sha256}:${nonce}`;
+      const signature = await wallet.signMessage(message);
+
+      const response = await request(app)
+        .post(`/api/firmware/GarageDoor?version=1.0.0+abc123&signature=${encodeURIComponent(signature)}&message=${encodeURIComponent(message)}`)
+        .set('Content-Type', 'application/octet-stream')
+        .send(firmware)
+        .expect(400);
+
+      expect(response.body.error).toContain('plain semver');
+    });
+
+    it('should reject version with project prefix', async () => {
+      const firmware = Buffer.from('fake firmware data');
+      const sha256 = createHash('sha256').update(firmware).digest('hex');
+
+      const challengeResp = await request(app).get('/api/admin/challenge').expect(200);
+      const { nonce } = challengeResp.body;
+
+      const message = `firmware:GarageDoor:garagedoor@1.0.0:${sha256}:${nonce}`;
+      const signature = await wallet.signMessage(message);
+
+      const response = await request(app)
+        .post(`/api/firmware/GarageDoor?version=garagedoor@1.0.0&signature=${encodeURIComponent(signature)}&message=${encodeURIComponent(message)}`)
+        .set('Content-Type', 'application/octet-stream')
+        .send(firmware)
+        .expect(400);
+
+      expect(response.body.error).toContain('plain semver');
+    });
+
+    it('should accept plain semver only', async () => {
+      const firmware = Buffer.from('fake firmware data');
+      const sha256 = createHash('sha256').update(firmware).digest('hex');
+
+      const challengeResp = await request(app).get('/api/admin/challenge').expect(200);
+      const { nonce } = challengeResp.body;
+
+      const message = `firmware:GarageDoor:1.2.3:${sha256}:${nonce}`;
+      const signature = await wallet.signMessage(message);
+
+      const response = await request(app)
+        .post(`/api/firmware/GarageDoor?version=1.2.3&signature=${encodeURIComponent(signature)}&message=${encodeURIComponent(message)}`)
+        .set('Content-Type', 'application/octet-stream')
+        .send(firmware)
+        .expect(200);
+
+      expect(response.body.success).toBe(true);
+      expect(response.body.version).toBe('1.2.3');
+    });
   });
 });

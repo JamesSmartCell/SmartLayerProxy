@@ -63,6 +63,52 @@ describe('FirmwareVersionParser', () => {
     });
   });
 
+  describe('extractSemver', () => {
+    it('should extract from plain semver', () => {
+      expect(FirmwareVersionParser.extractSemver('1.2.3')).toBe('1.2.3');
+      expect(FirmwareVersionParser.extractSemver('0.0.1')).toBe('0.0.1');
+      expect(FirmwareVersionParser.extractSemver('10.20.30')).toBe('10.20.30');
+    });
+
+    it('should extract from semver with v prefix', () => {
+      expect(FirmwareVersionParser.extractSemver('v1.2.3')).toBe('1.2.3');
+      expect(FirmwareVersionParser.extractSemver('v0.0.1')).toBe('0.0.1');
+    });
+
+    it('should extract from full device format', () => {
+      expect(FirmwareVersionParser.extractSemver('garagedoor@1.2.3+abc123')).toBe('1.2.3');
+      expect(FirmwareVersionParser.extractSemver('project@0.5.1')).toBe('0.5.1');
+    });
+
+    it('should extract from semver with build suffix', () => {
+      expect(FirmwareVersionParser.extractSemver('1.2.3+abc123')).toBe('1.2.3');
+      expect(FirmwareVersionParser.extractSemver('2.0.0+def4567')).toBe('2.0.0');
+    });
+
+    it('should return null for invalid formats', () => {
+      expect(FirmwareVersionParser.extractSemver('invalid')).toBeNull();
+      expect(FirmwareVersionParser.extractSemver('1.2')).toBeNull();
+      expect(FirmwareVersionParser.extractSemver('a.b.c')).toBeNull();
+      expect(FirmwareVersionParser.extractSemver('')).toBeNull();
+    });
+  });
+
+  describe('isPlainSemver', () => {
+    it('should return true for plain semver', () => {
+      expect(FirmwareVersionParser.isPlainSemver('1.2.3')).toBe(true);
+      expect(FirmwareVersionParser.isPlainSemver('0.0.0')).toBe(true);
+      expect(FirmwareVersionParser.isPlainSemver('10.20.30')).toBe(true);
+    });
+
+    it('should return false for non-plain semver', () => {
+      expect(FirmwareVersionParser.isPlainSemver('v1.2.3')).toBe(false);
+      expect(FirmwareVersionParser.isPlainSemver('1.2.3+abc')).toBe(false);
+      expect(FirmwareVersionParser.isPlainSemver('project@1.2.3')).toBe(false);
+      expect(FirmwareVersionParser.isPlainSemver('1.2')).toBe(false);
+      expect(FirmwareVersionParser.isPlainSemver('')).toBe(false);
+    });
+  });
+
   describe('compareSemver', () => {
     it('should return 0 for equal versions', () => {
       expect(FirmwareVersionParser.compareSemver('1.2.3', '1.2.3')).toBe(0);
@@ -95,6 +141,18 @@ describe('FirmwareVersionParser', () => {
       expect(FirmwareVersionParser.compareSemver('1.2.4', '1.2.3')).toBeGreaterThan(0);
       expect(FirmwareVersionParser.compareSemver('1.2.3', '1.2.4')).toBeLessThan(0);
     });
+
+    it('should compare versions with different formats', () => {
+      expect(FirmwareVersionParser.compareSemver('1.2.3', 'v1.2.4')).toBeLessThan(0);
+      expect(FirmwareVersionParser.compareSemver('v1.2.3', 'project@1.2.2+abc')).toBeGreaterThan(0);
+      expect(FirmwareVersionParser.compareSemver('1.2.3+build', '1.2.3')).toBe(0);
+    });
+
+    it('should return null for unparseable versions', () => {
+      expect(FirmwareVersionParser.compareSemver('invalid', '1.2.3')).toBeNull();
+      expect(FirmwareVersionParser.compareSemver('1.2.3', 'invalid')).toBeNull();
+      expect(FirmwareVersionParser.compareSemver('1.2', '1.2.3')).toBeNull();
+    });
   });
 
   describe('isOlder', () => {
@@ -108,6 +166,17 @@ describe('FirmwareVersionParser', () => {
       expect(FirmwareVersionParser.isOlder('1.2.4', '1.2.3')).toBe(false);
       expect(FirmwareVersionParser.isOlder('1.2.3', '1.2.3')).toBe(false);
       expect(FirmwareVersionParser.isOlder('2.0.0', '1.9.9')).toBe(false);
+    });
+
+    it('should compare versions with different formats', () => {
+      expect(FirmwareVersionParser.isOlder('1.2.3', 'v1.2.4')).toBe(true);
+      expect(FirmwareVersionParser.isOlder('v1.2.3', 'project@1.2.4+abc')).toBe(true);
+      expect(FirmwareVersionParser.isOlder('1.2.3', '1.2.3+build')).toBe(false);
+    });
+
+    it('should return null for unparseable versions', () => {
+      expect(FirmwareVersionParser.isOlder('invalid', '1.2.3')).toBeNull();
+      expect(FirmwareVersionParser.isOlder('1.2.3', 'invalid')).toBeNull();
     });
   });
 
