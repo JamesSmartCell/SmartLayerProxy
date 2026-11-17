@@ -50,6 +50,7 @@ function decodeFailureStage(code: number): string {
 
 function decodeWifiDisconnectReason(code: number): string {
   const reasons: Record<number, string> = {
+    0: 'none',
     1: 'UNSPECIFIED',
     2: 'AUTH_EXPIRE',
     3: 'AUTH_LEAVE',
@@ -86,6 +87,10 @@ function decodeWifiDisconnectReason(code: number): string {
 
 function createChallenge(): Buffer {
   return Buffer.from(require('crypto').randomBytes(16));
+}
+
+function sanitizeFirmwareVersion(version: string): string {
+  return version.replace(/[^\x20-\x7E]/g, '?');
 }
 
 export class ASyncTCPService implements TCPCallback {
@@ -294,7 +299,8 @@ export class ASyncTCPService implements TCPCallback {
             return;
           }
           const versionBytes = message.subarray(86, 86 + versionLen);
-          firmwareVersion = versionBytes.toString('utf-8');
+          const rawVersion = versionBytes.toString('utf-8');
+          firmwareVersion = sanitizeFirmwareVersion(rawVersion);
           
           const challenge = client.getChallenge();
           if (!challenge.length) {
@@ -345,13 +351,14 @@ export class ASyncTCPService implements TCPCallback {
             return;
           }
           if (authed && client.getAddress().toLowerCase() === addrLower) {
-            console.log('Refresh auth #' + index, addrLower, firmwareVersion ? `fw:${firmwareVersion}` : '');
+            console.log('Refresh auth #' + index, addrLower, firmwareVersion ? `fw=${firmwareVersion}` : '');
             this.touchPin(addrLower, ip);
             return;
           }
           client.setAddress(recoveredAddr);
           this.addToClientMap(recoveredAddr, index);
           this.touchPin(addrLower, ip);
+          console.log('Authenticated #' + index, addrLower, firmwareVersion ? `fw=${firmwareVersion}` : '(legacy)');
           this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip, firmwareVersion);
           return;
         }

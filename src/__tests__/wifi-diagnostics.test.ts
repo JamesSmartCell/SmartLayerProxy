@@ -133,6 +133,7 @@ describe('WiFi Diagnostics (opcode 0x0A)', () => {
 
   describe('WiFi Disconnect Reason Decoding', () => {
     const commonReasons = [
+      { code: 0, name: 'none' },
       { code: 1, name: 'UNSPECIFIED' },
       { code: 15, name: 'FOURWAY_HANDSHAKE_TIMEOUT' },
       { code: 23, name: 'IEEE_802_1X_AUTH_FAILED' },
@@ -153,6 +154,17 @@ describe('WiFi Diagnostics (opcode 0x0A)', () => {
       
       const diag = telemetry.getLatestDiagnostics(device);
       expect(diag?.wifiDisconnectReason).toBe(name);
+    });
+
+    it('should map unknown codes to unknown(N)', () => {
+      const device = '0xabc123';
+      
+      telemetry.recordDeviceDiagnostics(device, {
+        wifiDisconnectReason: 'unknown(99)',
+      });
+      
+      const diag = telemetry.getLatestDiagnostics(device);
+      expect(diag?.wifiDisconnectReason).toBe('unknown(99)');
     });
   });
 

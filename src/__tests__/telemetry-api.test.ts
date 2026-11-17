@@ -336,4 +336,59 @@ describe('Telemetry API', () => {
       expect(disconnectEvent.disconnectReason).toBe('timeout');
     });
   });
+
+  describe('GET /api/telemetry/devices/silent', () => {
+    it('should return 200 for silent devices endpoint', async () => {
+      const response = await request(app)
+        .get('/api/telemetry/devices/silent')
+        .set('Authorization', `Bearer ${TEST_API_KEY}`)
+        .expect(200);
+
+      expect(response.body).toHaveProperty('devices');
+      expect(response.body).toHaveProperty('params');
+      expect(response.body).toHaveProperty('serverTime');
+      expect(Array.isArray(response.body.devices)).toBe(true);
+    });
+
+    it('should not be caught by :address route', async () => {
+      const response = await request(app)
+        .get('/api/telemetry/devices/silent')
+        .set('Authorization', `Bearer ${TEST_API_KEY}`)
+        .expect(200);
+
+      expect(response.body).not.toHaveProperty('error');
+      expect(response.body.error).not.toBe('Device not found');
+    });
+
+    it('should support query parameters', async () => {
+      const response = await request(app)
+        .get('/api/telemetry/devices/silent?cadenceMultiplier=2&minSilenceMs=60000&includeRetired=true')
+        .set('Authorization', `Bearer ${TEST_API_KEY}`)
+        .expect(200);
+
+      expect(response.body.params.cadenceMultiplier).toBe(2);
+      expect(response.body.params.minSilenceMs).toBe(60000);
+      expect(response.body.params.includeRetired).toBe(true);
+    });
+
+    it('should use default parameters when not specified', async () => {
+      const response = await request(app)
+        .get('/api/telemetry/devices/silent')
+        .set('Authorization', `Bearer ${TEST_API_KEY}`)
+        .expect(200);
+
+      expect(response.body.params.cadenceMultiplier).toBe(3);
+      expect(response.body.params.minSilenceMs).toBe(15 * 60 * 1000);
+      expect(response.body.params.includeRetired).toBe(false);
+    });
+
+    it('should reject negative parameters', async () => {
+      const response = await request(app)
+        .get('/api/telemetry/devices/silent?cadenceMultiplier=-1')
+        .set('Authorization', `Bearer ${TEST_API_KEY}`)
+        .expect(400);
+
+      expect(response.body.error).toBe('Invalid parameters');
+    });
+  });
 });
