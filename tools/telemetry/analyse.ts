@@ -10,12 +10,13 @@
  * - Attribution: proxy vs Web3E TcpBridge/UdpBridge vs device firmware
  * 
  * Usage:
- *   ts-node tools/telemetry/analyse.ts [data/telemetry-YYYYMMDD.jsonl]
+ *   npm run telemetry:analyse [-- data/telemetry-YYYYMMDD.jsonl]
+ *   OR: ts-node tools/telemetry/analyse.ts [data/telemetry-YYYYMMDD.jsonl]
  * 
  * Outputs markdown report to stdout
  */
 
-import { readFileSync, readdirSync } from 'fs';
+import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 
 interface Event {

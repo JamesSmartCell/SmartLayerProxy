@@ -5,21 +5,39 @@
  * Signs and uploads firmware binaries to the proxy with admin authentication
  * 
  * Usage:
- *   ts-node tools/firmware/upload.ts <project> <version> <firmware.bin>
- *   ts-node tools/firmware/upload.ts GarageDoor 1.2.3 firmware.bin
+ *   npm run firmware:upload <project> <version> <firmware.bin>
+ *   OR: ts-node tools/firmware/upload.ts <project> <version> <firmware.bin>
+ * 
+ * Example:
+ *   npm run firmware:upload GarageDoor 1.2.3 firmware.bin
  * 
  * Requires .env with:
  *   PROXY_BASE_URL=https://your-proxy.com
  *   FIRMWARE_ADMIN_KEY=0x... (private key for signing)
+ * 
+ * .env locations (checked in order):
+ *   1. tools/firmware/.env
+ *   2. .env (repo root)
  */
 
 import { config } from 'dotenv';
-import { readFileSync, statSync } from 'fs';
+import { readFileSync, statSync, existsSync } from 'fs';
 import { join, basename } from 'path';
 import { Wallet } from 'ethers';
 import { createHash } from 'crypto';
 
-config({ path: join(__dirname, '..', '..', '.env') });
+// Try loading .env from multiple locations
+const envPaths = [
+  join(__dirname, '.env'),                    // tools/firmware/.env
+  join(__dirname, '..', '..', '.env'),        // repo root .env
+];
+
+for (const envPath of envPaths) {
+  if (existsSync(envPath)) {
+    config({ path: envPath });
+    break;
+  }
+}
 
 const PROXY_BASE_URL = process.env.PROXY_BASE_URL || 'http://localhost:8081';
 const FIRMWARE_ADMIN_KEY = process.env.FIRMWARE_ADMIN_KEY || '';
