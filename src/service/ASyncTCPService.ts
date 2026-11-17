@@ -6,6 +6,7 @@ import { MultiValueMap } from '../types';
 import { loadConfig } from '../config';
 import { getEthereumMessageHash, recoverAddressFromSignature } from '../crypto/signature';
 import { TelemetryService } from './TelemetryService';
+import { FirmwareVersionParser } from './FirmwareVersionParser';
 
 // ESP TcpBridge treats 5 minutes without a server packet as a dead session, and
 // it checks that *before* reading the inbound 0x06. Send keepalives sooner.
@@ -350,6 +351,18 @@ export class ASyncTCPService implements TCPCallback {
             return;
           }
           client.setAddress(recoveredAddr);
+          
+          if (firmwareVersion) {
+            const parsed = FirmwareVersionParser.parse(firmwareVersion);
+            if (parsed) {
+              client.setFirmwareInfo(firmwareVersion, parsed.project, parsed.semver);
+              console.log('Parsed firmware:', parsed.project, parsed.semver, parsed.hash || '(no hash)');
+            } else {
+              client.setFirmwareInfo(firmwareVersion);
+              console.log('Firmware version (legacy format):', firmwareVersion);
+            }
+          }
+          
           this.addToClientMap(recoveredAddr, index);
           this.touchPin(addrLower, ip);
           this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip, firmwareVersion);
@@ -522,6 +535,35 @@ export class ASyncTCPService implements TCPCallback {
     }
     if (!foundAddr) sb.push('</br>No devices');
     return sb.join('');
+  }
+
+  getConnectedDevices(): Array<{ address: string; project?: string; semver?: string; firmwareVersion?: string }> {
+    const devices: Array<{ address: string; project?: string; semver?: string; firmwareVersion?: string }> = [];
+    
+    for (const [address, index] of this.clientMap) {
+      const client = this.clientIndexList.get(index);
+      if (!client || !client.isAlive()) continue;
+      
+      devices.push({
+        address,
+        project: client.getFirmwareProject(),
+        semver: client.getFirmwareSemver(),
+        firmwareVersion: client.getFirmwareVersion(),
+      });
+    }
+    
+    return devices;
+  }
+
+  async sendApiCallToDevice(address: string, method: string, argMap: MultiValueMap): Promise<void> {
+    const addrLower = address.toLowerCase();
+    const idx = this.clientMap.get(addrLower);
+    if (idx === undefined) return;
+
+    const client = this.clientIndexList.get(idx);
+    if (!client || !client.isAlive()) return;
+
+    client.sendMessage(method, argMap);
   }
 
   getLoginChallenge(remoteAddr: string): string {

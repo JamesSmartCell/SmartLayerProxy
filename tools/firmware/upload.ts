@@ -5,11 +5,12 @@
  * Signs and uploads firmware binaries to the proxy with admin authentication
  * 
  * Usage:
- *   npm run firmware:upload <project> <version> <firmware.bin>
- *   OR: ts-node tools/firmware/upload.ts <project> <version> <firmware.bin>
+ *   npm run firmware:upload <project> <version> <firmware.bin> [--notify]
+ *   OR: ts-node tools/firmware/upload.ts <project> <version> <firmware.bin> [--notify]
  * 
  * Example:
  *   npm run firmware:upload GarageDoor 1.2.3 firmware.bin
+ *   npm run firmware:upload GarageDoor 1.2.3 firmware.bin --notify
  * 
  * Requires .env with:
  *   PROXY_BASE_URL=https://your-proxy.com
@@ -58,7 +59,8 @@ async function getChallenge(): Promise<string> {
 async function uploadFirmware(
   project: string,
   version: string,
-  firmwareBuffer: Buffer
+  firmwareBuffer: Buffer,
+  notify: boolean
 ): Promise<any> {
   if (!FIRMWARE_ADMIN_KEY) {
     throw new Error('FIRMWARE_ADMIN_KEY not set in .env');
@@ -80,9 +82,13 @@ async function uploadFirmware(
   console.log(`Signing address: ${wallet.address}`);
 
   // Upload firmware
-  const url = `${PROXY_BASE_URL}/api/firmware/${encodeURIComponent(project)}?version=${encodeURIComponent(version)}&signature=${encodeURIComponent(signature)}&message=${encodeURIComponent(message)}`;
+  const notifyParam = notify ? '&notify=true' : '';
+  const url = `${PROXY_BASE_URL}/api/firmware/${encodeURIComponent(project)}?version=${encodeURIComponent(version)}&signature=${encodeURIComponent(signature)}&message=${encodeURIComponent(message)}${notifyParam}`;
   
   console.log(`Uploading ${firmwareBuffer.length} bytes to ${project} v${version}...`);
+  if (notify) {
+    console.log('Will notify connected devices after upload');
+  }
   
   const response = await fetch(url, {
     method: 'POST',
@@ -104,12 +110,15 @@ async function main() {
   const args = process.argv.slice(2);
   
   if (args.length < 3) {
-    console.error('Usage: ts-node upload.ts <project> <version> <firmware.bin>');
+    console.error('Usage: ts-node upload.ts <project> <version> <firmware.bin> [--notify]');
     console.error('Example: ts-node upload.ts GarageDoor 1.2.3 firmware.bin');
+    console.error('         ts-node upload.ts GarageDoor 1.2.3 firmware.bin --notify');
     process.exit(1);
   }
 
-  const [project, version, firmwarePath] = args;
+  const notify = args.includes('--notify');
+  const fileArgs = args.filter(a => a !== '--notify');
+  const [project, version, firmwarePath] = fileArgs;
 
   if (!FIRMWARE_ADMIN_KEY) {
     console.error('Error: FIRMWARE_ADMIN_KEY not set in .env');
@@ -119,15 +128,20 @@ async function main() {
   console.log(`Project: ${project}`);
   console.log(`Version: ${version}`);
   console.log(`File: ${firmwarePath}`);
+  console.log(`Notify: ${notify}`);
 
   const firmwareBuffer = readFileSync(firmwarePath);
   const stats = statSync(firmwarePath);
   console.log(`Size: ${stats.size} bytes (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
 
-  const result = await uploadFirmware(project, version, firmwareBuffer);
+  const result = await uploadFirmware(project, version, firmwareBuffer, notify);
   
   console.log('\n✅ Upload successful!');
   console.log(JSON.stringify(result, null, 2));
+  
+  if (notify && result.notified !== undefined) {
+    console.log(`\n📢 Notified ${result.notified} device(s)`);
+  }
 }
 
 main().catch(err => {

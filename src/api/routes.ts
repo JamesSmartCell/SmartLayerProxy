@@ -8,6 +8,7 @@ import { TelemetryService } from '../service/TelemetryService';
 import { FirmwareService } from '../service/FirmwareService';
 import { AdminAuthService } from '../service/AdminAuthService';
 import { loadConfig } from '../config';
+import { FirmwareVersionParser } from '../service/FirmwareVersionParser';
 
 const CHECK_CONNECTION_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -378,9 +379,143 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         return;
       }
 
-      res.json({ success: true, project, version, setBy: result.address });
+      const shouldNotify = req.query.notify === 'true';
+      let notifyResult;
+      
+      if (shouldNotify) {
+        try {
+          const latest = firmware.getLatestFirmware(project);
+          if (latest) {
+            const connectedDevices = tcpService.getConnectedDevices();
+            const notified: Array<{ address: string; version: string }> = [];
+            
+            for (const device of connectedDevices) {
+              if (device.project?.toLowerCase() === project.toLowerCase() && device.semver) {
+                if (FirmwareVersionParser.isOlder(device.semver, latest.version)) {
+                  await tcpService.sendApiCallToDevice(device.address, 'updateReady', {});
+                  notified.push({ address: device.address, version: device.semver });
+                  telemetry.recordFirmwareNotify(device.address, project, latest.version);
+                }
+              }
+            }
+            notifyResult = { notified: notified.length };
+          }
+        } catch (err) {
+          console.error('[Firmware] Auto-notify error:', err);
+        }
+      }
+
+      res.json({ 
+        success: true, 
+        project, 
+        version, 
+        setBy: result.address,
+        ...(notifyResult ? { notified: notifyResult.notified } : {})
+      });
     } catch (err) {
       console.error('[Firmware] Set current error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.post('/firmware/:project/notify', express.json(), async (req, res) => {
+    try {
+      if (!firmware) {
+        res.status(503).json({ error: 'Firmware service not initialized' });
+        return;
+      }
+
+      const project = req.params.project;
+      const { devices, force, signature, message } = req.body || {};
+
+      const adminAddresses = getAdminAddresses();
+      if (adminAddresses.length === 0) {
+        res.status(503).json({ error: 'Admin addresses not configured' });
+        return;
+      }
+
+      if (!signature || !message) {
+        res.status(400).json({ error: 'Missing signature or message' });
+        return;
+      }
+
+      const nonceMatch = message.match(/:([a-f0-9]{64})$/);
+      if (!nonceMatch) {
+        res.status(400).json({ error: 'Message does not contain valid nonce' });
+        return;
+      }
+      const nonce = nonceMatch[1];
+
+      const expectedMessagePrefix = `notify:${project}:`;
+      if (!message.startsWith(expectedMessagePrefix)) {
+        res.status(400).json({ error: 'Message format mismatch' });
+        return;
+      }
+
+      const authResult = adminAuth.verifyAndBurnNonce(nonce, message, signature, adminAddresses);
+      if (!authResult.valid) {
+        res.status(403).json({ error: authResult.error || 'Signature verification failed' });
+        return;
+      }
+
+      const latest = firmware.getLatestFirmware(project);
+      if (!latest) {
+        res.status(404).json({ error: 'No firmware found for this project' });
+        return;
+      }
+
+      const connectedDevices = tcpService.getConnectedDevices();
+      
+      const notified: Array<{ address: string; version: string }> = [];
+      const skipped: Array<{ address: string; reason: string }> = [];
+
+      const targetAddresses = devices ? devices.map((d: string) => d.toLowerCase()) : null;
+
+      for (const device of connectedDevices) {
+        if (targetAddresses && !targetAddresses.includes(device.address.toLowerCase())) {
+          continue;
+        }
+
+        if (!device.project || device.project.toLowerCase() !== project.toLowerCase()) {
+          if (targetAddresses && targetAddresses.includes(device.address.toLowerCase())) {
+            skipped.push({ address: device.address, reason: 'different project or legacy format' });
+          }
+          continue;
+        }
+
+        if (!device.semver) {
+          skipped.push({ address: device.address, reason: 'no semver available' });
+          continue;
+        }
+
+        const shouldNotify = force || FirmwareVersionParser.isOlder(device.semver, latest.version);
+        
+        if (!shouldNotify) {
+          skipped.push({ address: device.address, reason: 'already up to date' });
+          continue;
+        }
+
+        try {
+          await tcpService.sendApiCallToDevice(device.address, 'updateReady', {});
+          notified.push({ address: device.address, version: device.semver });
+          telemetry.recordFirmwareNotify(device.address, project, latest.version);
+          console.log('Notified device', device.address, 'about firmware update:', project, latest.version);
+        } catch (err) {
+          console.error('Failed to notify device', device.address, err);
+          skipped.push({ address: device.address, reason: 'send failed' });
+        }
+      }
+
+      res.json({
+        success: true,
+        project,
+        latest: latest.version,
+        notified,
+        skipped,
+        notifiedBy: authResult.address,
+      });
+    } catch (err) {
+      console.error('[Firmware] Notify error:', err);
       res.status(500).json({ error: 'Internal error' });
     }
   });
@@ -474,6 +609,29 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         true
       );
 
+      const shouldNotify = req.query.notify === 'true';
+      let notifyResult;
+      
+      if (shouldNotify) {
+        try {
+          const connectedDevices = tcpService.getConnectedDevices();
+          const notified: Array<{ address: string; version: string }> = [];
+          
+          for (const device of connectedDevices) {
+            if (device.project?.toLowerCase() === project.toLowerCase() && device.semver) {
+              if (FirmwareVersionParser.isOlder(device.semver, version)) {
+                await tcpService.sendApiCallToDevice(device.address, 'updateReady', {});
+                notified.push({ address: device.address, version: device.semver });
+                telemetry.recordFirmwareNotify(device.address, project, version);
+              }
+            }
+          }
+          notifyResult = { notified: notified.length };
+        } catch (err) {
+          console.error('[Firmware] Auto-notify error:', err);
+        }
+      }
+
       res.json({
         success: true,
         project: metadata.project,
@@ -482,6 +640,7 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         size: metadata.size,
         url: metadata.url,
         uploadedBy: metadata.uploadedBy,
+        ...(notifyResult ? { notified: notifyResult.notified } : {})
       });
     } catch (err) {
       console.error('[Firmware] Upload error:', err);
@@ -607,6 +766,28 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         return;
       }
       const devices = telemetry.getAllDeviceMetrics(since);
+      
+      if (firmware) {
+        for (const device of devices) {
+          if (device.firmwareVersion) {
+            const parsed = FirmwareVersionParser.parse(device.firmwareVersion);
+            if (parsed) {
+              const latest = firmware.getLatestFirmware(parsed.project);
+              if (latest && latest.version !== parsed.semver) {
+                const isOlder = FirmwareVersionParser.isOlder(parsed.semver, latest.version);
+                (device as any).project = parsed.project;
+                (device as any).version = parsed.semver;
+                (device as any).updateAvailable = isOlder;
+              } else {
+                (device as any).project = parsed.project;
+                (device as any).version = parsed.semver;
+                (device as any).updateAvailable = false;
+              }
+            }
+          }
+        }
+      }
+      
       res.json(devices);
     } catch (err) {
       console.error(err);
