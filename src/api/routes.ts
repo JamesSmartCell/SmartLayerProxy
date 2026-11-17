@@ -24,6 +24,18 @@ function normalizeAddress(addr: string): string {
   return '0x' + addr.replace(/^0x/i, '').toLowerCase();
 }
 
+function getClientIp(req: Request): string {
+  const config = loadConfig();
+  if (config.trustProxy) {
+    const forwardedFor = req.get('x-forwarded-for') || req.get('cf-connecting-ip');
+    if (forwardedFor) {
+      const ips = forwardedFor.split(',').map(ip => ip.trim());
+      return ips[0];
+    }
+  }
+  return req.socket.remoteAddress ?? '';
+}
+
 function parseQueryParams(req: Request): Record<string, string[]> {
   const params: Record<string, string[]> = {};
   for (const [key, val] of Object.entries(req.query)) {
@@ -145,6 +157,49 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
       });
     } catch (err) {
       console.error('[Telemetry] Feed error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/telemetry/diagnostics/feed', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const afterId = parseInt(req.query.afterId as string) || 0;
+      const limit = Math.min(
+        parseInt(req.query.limit as string) || 1000,
+        config.telemetryFeedMaxLimit
+      );
+
+      const stmt = telemetry['db'].prepare(`
+        SELECT
+          id, timestamp, device,
+          reset_reason as resetReason,
+          boot_count as bootCount,
+          wifi_attempts as wifiAttempts,
+          connect_time_ms as connectTimeMs,
+          network_index as networkIndex,
+          ssid_hash as ssidHash,
+          last_failure_stage as lastFailureStage
+        FROM device_diagnostics
+        WHERE id > ?
+        ORDER BY id ASC
+        LIMIT ?
+      `);
+
+      const rows = stmt.all(afterId, limit) as any[];
+      
+      const maxIdStmt = telemetry['db'].prepare('SELECT MAX(id) as maxId FROM device_diagnostics');
+      const { maxId } = maxIdStmt.get() as any;
+      
+      const hasMore = rows.length === limit && maxId > (rows[rows.length - 1]?.id || 0);
+
+      res.json({
+        rows,
+        maxId: maxId || 0,
+        hasMore,
+        serverTime: Date.now(),
+      });
+    } catch (err) {
+      console.error('[Telemetry] Diagnostics feed error:', err);
       res.status(500).json({ error: 'Internal error' });
     }
   });
@@ -619,6 +674,69 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
     }
   });
 
+  router.get('/telemetry/devices/silent', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const cadenceMultiplier = req.query.cadenceMultiplier 
+        ? parseFloat(req.query.cadenceMultiplier as string)
+        : 3;
+      const minSilenceMs = req.query.minSilenceMs
+        ? parseInt(req.query.minSilenceMs as string)
+        : 15 * 60 * 1000;
+      const includeRetired = req.query.includeRetired === 'true';
+
+      if (cadenceMultiplier < 0 || minSilenceMs < 0) {
+        res.status(400).json({ error: 'Invalid parameters' });
+        return;
+      }
+
+      const silentDevices = telemetry.getSilentDevices({
+        cadenceMultiplier,
+        minSilenceMs,
+        includeRetired,
+      });
+
+      res.json({ 
+        devices: silentDevices,
+        params: { cadenceMultiplier, minSilenceMs, includeRetired },
+        serverTime: Date.now(),
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.post('/telemetry/devices/:address/retired', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const address = normalizeAddress(req.params.address);
+      const { retired, notes } = req.body || {};
+
+      if (typeof retired !== 'boolean') {
+        res.status(400).json({ error: 'Missing or invalid retired boolean' });
+        return;
+      }
+
+      telemetry.markDeviceRetired(address, retired, notes);
+      res.json({ success: true, address, retired, notes: notes || null });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.post('/telemetry/devices/:address/diagnostics', telemetryAuthMiddleware, (req, res) => {
+    try {
+      const address = normalizeAddress(req.params.address);
+      const diagnostics = req.body || {};
+
+      telemetry.recordDeviceDiagnostics(address, diagnostics);
+      res.json({ success: true, address });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
   // ========== Camera upload (called by Remote Camera device) ==========
   router.post('/camera/upload', express.raw({ type: 'image/jpeg', limit: '3mb' }), async (req, res) => {
     try {
@@ -653,7 +771,8 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
   async function handleApiCall(req: Request, res: Response, asyncPath: boolean): Promise<void> {
     const address = normalizeAddress(req.params.Address);
     const method = req.params.method;
-    const clientDesignator = req.socket.remoteAddress + '-' + address + method;
+    const clientIp = getClientIp(req);
+    const clientDesignator = clientIp + '-' + address + method;
     console.log('[TS-Proxy] ADDRESS:', address, 'METHOD:', method);
     const argMap = parseQueryParams(req);
 
@@ -695,7 +814,7 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
 
   router.all('/getEthAddress', async (req, res) => {
     try {
-      const ipAddress = req.socket.remoteAddress ?? '';
+      const ipAddress = getClientIp(req);
       const [udpAddrs, tcpAddrs] = await Promise.all([
         service.getDeviceAddress(ipAddress),
         tcpService.getDeviceAddress(ipAddress),
@@ -712,12 +831,13 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
     try {
       const address = normalizeAddress(req.params.Address);
       const method = req.params.data;
-      const clientDesignator = req.socket.remoteAddress + '-' + address + method;
+      const clientIp = getClientIp(req);
+      const clientDesignator = clientIp + '-' + address + method;
       console.log('ADDRESS:', address);
       console.log('METHOD:', method);
       console.log('Designator:', clientDesignator);
 
-      const response = tcpService.handleDeviceConnection(address, method, req.socket.remoteAddress ?? '');
+      const response = tcpService.handleDeviceConnection(address, method, clientIp);
       res.status(201).send(response);
     } catch (err) {
       console.error(err);
@@ -727,8 +847,9 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
 
   router.all('/bridge/login', async (req, res) => {
     try {
-      console.log('Login:', req.socket.remoteAddress);
-      const response = tcpService.getLoginChallenge(req.socket.remoteAddress ?? '');
+      const clientIp = getClientIp(req);
+      console.log('Login:', clientIp);
+      const response = tcpService.getLoginChallenge(clientIp);
       res.status(201).send(response);
     } catch (err) {
       console.error(err);

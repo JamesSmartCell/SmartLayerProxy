@@ -13,6 +13,7 @@ export interface Config {
   telemetryAckEnabled: boolean;
   telemetryFeedMaxLimit: number;
   firmwareUploadMaxSizeMb: number;
+  trustProxy: boolean;
 }
 
 function loadProperties(): Record<string, string> {
@@ -72,5 +73,6 @@ export function loadConfig(): Config {
     firmwareUploadMaxSizeMb: parseInt(
       process.env.FIRMWARE_UPLOAD_MAX_SIZE_MB || props['firmware.upload.max.size.mb'] || '10', 10
     ),
+    trustProxy: (process.env.TRUST_PROXY || props['trust.proxy'] || 'false').toLowerCase() === 'true',
   };
 }

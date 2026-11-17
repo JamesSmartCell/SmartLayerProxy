@@ -14,6 +14,10 @@ const UNAUTH_GRACE_MS = 30 * 1000;
 const MAX_TCP_CLIENTS = 64;
 const HEX_RE = /^[0-9a-fA-F]*$/;
 
+const OPCODE_AUTH_LEGACY = 0x07;
+const OPCODE_AUTH_WITH_VERSION = 0x09;
+const MAX_FIRMWARE_VERSION_LEN = 32;
+
 function createChallenge(): Buffer {
   return Buffer.from(require('crypto').randomBytes(16));
 }
@@ -204,21 +208,54 @@ export class ASyncTCPService implements TCPCallback {
       case 0x02:
         return;
       case 0x03:
-      case 0x07: {
-        if (message.length < 85) {
-          this.dropUnauth(client, index, 'short auth');
-          return;
+      case OPCODE_AUTH_LEGACY:
+      case OPCODE_AUTH_WITH_VERSION: {
+        let firmwareVersion: string | undefined = undefined;
+        let preimage: Buffer;
+        
+        if (opcode === OPCODE_AUTH_WITH_VERSION) {
+          if (message.length < 86) {
+            this.dropUnauth(client, index, 'short auth with version');
+            return;
+          }
+          const versionLen = message[85];
+          if (versionLen > MAX_FIRMWARE_VERSION_LEN) {
+            this.dropUnauth(client, index, 'version length exceeds max');
+            return;
+          }
+          if (message.length < 86 + versionLen) {
+            this.dropUnauth(client, index, 'truncated version');
+            return;
+          }
+          const versionBytes = message.subarray(86, 86 + versionLen);
+          firmwareVersion = versionBytes.toString('utf-8');
+          
+          const challenge = client.getChallenge();
+          if (!challenge.length) {
+            this.dropUnauth(client, index, 'auth before challenge');
+            return;
+          }
+          
+          preimage = Buffer.concat([challenge, Buffer.from([versionLen]), versionBytes]);
+        } else {
+          if (message.length < 85) {
+            this.dropUnauth(client, index, 'short auth');
+            return;
+          }
+          const challenge = client.getChallenge();
+          if (!challenge.length) {
+            this.dropUnauth(client, index, 'auth before challenge');
+            return;
+          }
+          preimage = challenge;
         }
+        
         const addrBytes = message.subarray(0, 20);
         const sig = message.subarray(20, 85);
-        const challenge = client.getChallenge();
-        if (!challenge.length) {
-          this.dropUnauth(client, index, 'auth before challenge');
-          return;
-        }
+        
         let recoveredAddr = '';
         try {
-          const msgHash = opcode === 0x03 ? getEthereumMessageHash(challenge) : ethers.keccak256(challenge);
+          const msgHash = opcode === 0x03 ? getEthereumMessageHash(preimage) : ethers.keccak256(preimage);
           recoveredAddr = recoverAddressFromSignature(msgHash, new Uint8Array(sig));
         } catch (err) {
           console.error('Recover failed #' + index, err instanceof Error ? err.message : err);
@@ -242,14 +279,14 @@ export class ASyncTCPService implements TCPCallback {
             return;
           }
           if (authed && client.getAddress().toLowerCase() === addrLower) {
-            console.log('Refresh auth #' + index, addrLower);
+            console.log('Refresh auth #' + index, addrLower, firmwareVersion ? `fw:${firmwareVersion}` : '');
             this.touchPin(addrLower, ip);
             return;
           }
           client.setAddress(recoveredAddr);
           this.addToClientMap(recoveredAddr, index);
           this.touchPin(addrLower, ip);
-          this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip);
+          this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip, firmwareVersion);
           return;
         }
         this.dropUnauth(client, index, 'bad signature');
