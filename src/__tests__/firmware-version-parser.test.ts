@@ -61,6 +61,93 @@ describe('FirmwareVersionParser', () => {
         patch: 0,
       });
     });
+
+    it('should parse version with dirty git tag', () => {
+      const result = FirmwareVersionParser.parse('garagedoor@1.2.2+a57a610-dirty');
+      expect(result).toEqual({
+        project: 'garagedoor',
+        semver: '1.2.2',
+        hash: 'a57a610-dirty',
+        major: 1,
+        minor: 2,
+        patch: 2,
+      });
+    });
+
+    it('should parse version with simple hash build metadata', () => {
+      const result = FirmwareVersionParser.parse('garagedoor@1.2.0+a4eda92');
+      expect(result).toEqual({
+        project: 'garagedoor',
+        semver: '1.2.0',
+        hash: 'a4eda92',
+        major: 1,
+        minor: 2,
+        patch: 0,
+      });
+    });
+
+    it('should parse version without build metadata', () => {
+      const result = FirmwareVersionParser.parse('garagedoor@1.2.0');
+      expect(result).toEqual({
+        project: 'garagedoor',
+        semver: '1.2.0',
+        hash: undefined,
+        major: 1,
+        minor: 2,
+        patch: 0,
+      });
+    });
+
+    it('should parse version with dot-separated build metadata', () => {
+      const result = FirmwareVersionParser.parse('garagedoor@1.2.0+abc.def-1');
+      expect(result).toEqual({
+        project: 'garagedoor',
+        semver: '1.2.0',
+        hash: 'abc.def-1',
+        major: 1,
+        minor: 2,
+        patch: 0,
+      });
+    });
+
+    it('should parse version with e2e build metadata', () => {
+      const result = FirmwareVersionParser.parse('garagedoor@1.2.0+e2e-5f3075a');
+      expect(result).toEqual({
+        project: 'garagedoor',
+        semver: '1.2.0',
+        hash: 'e2e-5f3075a',
+        major: 1,
+        minor: 2,
+        patch: 0,
+      });
+    });
+
+    it('should reject incomplete semver', () => {
+      expect(FirmwareVersionParser.parse('garagedoor@1.2')).toBeNull();
+      expect(FirmwareVersionParser.parse('garagedoor@1')).toBeNull();
+    });
+
+    it('should reject version with no project', () => {
+      expect(FirmwareVersionParser.parse('@1.2.0')).toBeNull();
+    });
+
+    it('should reject version with empty build metadata', () => {
+      expect(FirmwareVersionParser.parse('garagedoor@1.2.0+')).toBeNull();
+    });
+
+    it('should reject version with invalid characters in build metadata', () => {
+      expect(FirmwareVersionParser.parse('garagedoor@1.2.0+a b')).toBeNull();
+      expect(FirmwareVersionParser.parse('garagedoor@1.2.0+a+b')).toBeNull();
+      expect(FirmwareVersionParser.parse('garagedoor@1.2.0+a/b')).toBeNull();
+    });
+
+    it('should reject version with double dot in build metadata', () => {
+      expect(FirmwareVersionParser.parse('garagedoor@1.2.0+a..b')).toBeNull();
+    });
+
+    it('should reject version with trailing dot in build metadata', () => {
+      expect(FirmwareVersionParser.parse('garagedoor@1.2.0+abc.')).toBeNull();
+    });
   });
 
   describe('extractSemver', () => {
@@ -90,6 +177,27 @@ describe('FirmwareVersionParser', () => {
       expect(FirmwareVersionParser.extractSemver('1.2')).toBeNull();
       expect(FirmwareVersionParser.extractSemver('a.b.c')).toBeNull();
       expect(FirmwareVersionParser.extractSemver('')).toBeNull();
+    });
+
+    it('should extract from version with dirty git tag', () => {
+      expect(FirmwareVersionParser.extractSemver('garagedoor@1.2.2+a57a610-dirty')).toBe('1.2.2');
+      expect(FirmwareVersionParser.extractSemver('1.2.2+a57a610-dirty')).toBe('1.2.2');
+    });
+
+    it('should extract from version with dot-separated build metadata', () => {
+      expect(FirmwareVersionParser.extractSemver('garagedoor@1.2.0+abc.def-1')).toBe('1.2.0');
+      expect(FirmwareVersionParser.extractSemver('1.2.0+abc.def-1')).toBe('1.2.0');
+    });
+
+    it('should extract from version with e2e build metadata', () => {
+      expect(FirmwareVersionParser.extractSemver('garagedoor@1.2.0+e2e-5f3075a')).toBe('1.2.0');
+      expect(FirmwareVersionParser.extractSemver('1.2.0+e2e-5f3075a')).toBe('1.2.0');
+    });
+
+    it('should return null for invalid build metadata', () => {
+      expect(FirmwareVersionParser.extractSemver('garagedoor@1.2.0+')).toBeNull();
+      expect(FirmwareVersionParser.extractSemver('garagedoor@1.2.0+a+b')).toBeNull();
+      expect(FirmwareVersionParser.extractSemver('1.2.0+a b')).toBeNull();
     });
   });
 
@@ -148,6 +256,19 @@ describe('FirmwareVersionParser', () => {
       expect(FirmwareVersionParser.compareSemver('1.2.3+build', '1.2.3')).toBe(0);
     });
 
+    it('should ignore build metadata when comparing versions', () => {
+      expect(FirmwareVersionParser.compareSemver('1.2.3+a57a610-dirty', '1.2.3')).toBe(0);
+      expect(FirmwareVersionParser.compareSemver('1.2.3', '1.2.3+a57a610-dirty')).toBe(0);
+      expect(FirmwareVersionParser.compareSemver('1.2.3+abc', '1.2.3+def')).toBe(0);
+      expect(FirmwareVersionParser.compareSemver('garagedoor@1.2.0+a4eda92', 'garagedoor@1.2.0+abc.def-1')).toBe(0);
+    });
+
+    it('should compare versions with build metadata correctly', () => {
+      expect(FirmwareVersionParser.compareSemver('1.2.2+a57a610-dirty', '1.2.3')).toBeLessThan(0);
+      expect(FirmwareVersionParser.compareSemver('1.2.3+dirty', '1.2.2')).toBeGreaterThan(0);
+      expect(FirmwareVersionParser.compareSemver('garagedoor@1.2.0+e2e-5f3075a', 'garagedoor@1.2.1')).toBeLessThan(0);
+    });
+
     it('should return null for unparseable versions', () => {
       expect(FirmwareVersionParser.compareSemver('invalid', '1.2.3')).toBeNull();
       expect(FirmwareVersionParser.compareSemver('1.2.3', 'invalid')).toBeNull();
@@ -174,6 +295,25 @@ describe('FirmwareVersionParser', () => {
       expect(FirmwareVersionParser.isOlder('1.2.3', '1.2.3+build')).toBe(false);
     });
 
+    it('should ignore build metadata when checking if version is older', () => {
+      expect(FirmwareVersionParser.isOlder('1.2.2+a57a610-dirty', '1.2.2')).toBe(false);
+      expect(FirmwareVersionParser.isOlder('1.2.2', '1.2.2+a57a610-dirty')).toBe(false);
+      expect(FirmwareVersionParser.isOlder('1.2.2+abc', '1.2.2+def')).toBe(false);
+    });
+
+    it('should correctly identify dirty-tagged older device for notify eligibility', () => {
+      expect(FirmwareVersionParser.isOlder('garagedoor@1.2.0+a4eda92', 'garagedoor@1.2.2')).toBe(true);
+      expect(FirmwareVersionParser.isOlder('garagedoor@1.2.0+a57a610-dirty', 'garagedoor@1.2.2')).toBe(true);
+      expect(FirmwareVersionParser.isOlder('garagedoor@1.2.2+a57a610-dirty', 'garagedoor@1.2.2')).toBe(false);
+      expect(FirmwareVersionParser.isOlder('garagedoor@1.2.2+dirty', 'garagedoor@1.2.3')).toBe(true);
+    });
+
+    it('should handle version comparison with various build metadata formats', () => {
+      expect(FirmwareVersionParser.isOlder('1.2.0+e2e-5f3075a', '1.2.1')).toBe(true);
+      expect(FirmwareVersionParser.isOlder('1.2.0+abc.def-1', '1.2.0')).toBe(false);
+      expect(FirmwareVersionParser.isOlder('1.2.3+build', '1.2.2')).toBe(false);
+    });
+
     it('should return null for unparseable versions', () => {
       expect(FirmwareVersionParser.isOlder('invalid', '1.2.3')).toBeNull();
       expect(FirmwareVersionParser.isOlder('1.2.3', 'invalid')).toBeNull();
@@ -187,11 +327,24 @@ describe('FirmwareVersionParser', () => {
       expect(FirmwareVersionParser.isNewFormat('my-proj@1.0.0+abc123')).toBe(true);
     });
 
+    it('should return true for new format with build metadata', () => {
+      expect(FirmwareVersionParser.isNewFormat('garagedoor@1.2.2+a57a610-dirty')).toBe(true);
+      expect(FirmwareVersionParser.isNewFormat('garagedoor@1.2.0+a4eda92')).toBe(true);
+      expect(FirmwareVersionParser.isNewFormat('garagedoor@1.2.0+abc.def-1')).toBe(true);
+      expect(FirmwareVersionParser.isNewFormat('garagedoor@1.2.0+e2e-5f3075a')).toBe(true);
+    });
+
     it('should return false for legacy format strings', () => {
       expect(FirmwareVersionParser.isNewFormat('legacy')).toBe(false);
       expect(FirmwareVersionParser.isNewFormat('1.2.3')).toBe(false);
       expect(FirmwareVersionParser.isNewFormat('v1.2.3')).toBe(false);
       expect(FirmwareVersionParser.isNewFormat('')).toBe(false);
+    });
+
+    it('should return false for invalid build metadata', () => {
+      expect(FirmwareVersionParser.isNewFormat('garagedoor@1.2.0+')).toBe(false);
+      expect(FirmwareVersionParser.isNewFormat('garagedoor@1.2.0+a+b')).toBe(false);
+      expect(FirmwareVersionParser.isNewFormat('garagedoor@1.2.0+a b')).toBe(false);
     });
   });
 });
