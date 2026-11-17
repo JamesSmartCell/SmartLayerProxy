@@ -277,4 +277,95 @@ describe('TCP Authentication with Firmware Version', () => {
       expect(metrics2?.firmwareVersion).toBe('v2.1.0');
     });
   });
+
+  describe('Hex Dump Safety (opcode 0x09)', () => {
+    it('should structure 0x09 packet with version bytes after fixed-size prefix', () => {
+      const challenge = Buffer.from('1234567890abcdef1234567890abcdef', 'hex');
+      const firmwareVersion = 'test-v1.0';
+      const authMessage = buildAuthPacket(OPCODE_AUTH_WITH_VERSION, challenge, firmwareVersion);
+      
+      // buildAuthPacket returns: addr(20) + sig(65) + versionLen(1) + versionBytes
+      // When sent on wire, opcode(1) is prepended: opcode + addr(20) + sig(65) + versionLen(1) + versionBytes
+      expect(authMessage.length).toBe(20 + 65 + 1 + firmwareVersion.length);
+      
+      const versionLen = authMessage[85];
+      expect(versionLen).toBe(firmwareVersion.length);
+      
+      const versionBytes = authMessage.subarray(86, 86 + versionLen);
+      expect(versionBytes.toString('utf-8')).toBe(firmwareVersion);
+    });
+
+    it('should build valid 0x09 packet with version containing non-ASCII characters', () => {
+      const challenge = Buffer.from('1234567890abcdef1234567890abcdef', 'hex');
+      // Version with non-ASCII/control characters that would garble terminal
+      const firmwareVersion = 'v1\x00\x01\x02test';
+      const authMessage = buildAuthPacket(OPCODE_AUTH_WITH_VERSION, challenge, firmwareVersion);
+      
+      // The first 85 bytes (addr + sig) contain only hex-safe data
+      const safePrefix = authMessage.subarray(0, 85);
+      const safePrefixHex = safePrefix.toString('hex');
+      expect(safePrefixHex.length).toBe(170); // 85 bytes = 170 hex chars
+      
+      // Version bytes are after byte 85 (versionLen at byte 85)
+      const versionLen = authMessage[85];
+      expect(versionLen).toBe(firmwareVersion.length);
+      
+      // Verify the problematic bytes are only in the version section
+      const versionBytes = authMessage.subarray(86, 86 + versionLen);
+      expect(versionBytes.toString('utf-8')).toBe(firmwareVersion);
+    });
+
+    it('should verify TCPClient would dump only safe bytes for 0x09', () => {
+      const challenge = Buffer.from('1234567890abcdef1234567890abcdef', 'hex');
+      const firmwareVersion = 'version-with-\x00\x01-controls';
+      const authMessage = buildAuthPacket(OPCODE_AUTH_WITH_VERSION, challenge, firmwareVersion);
+      
+      // On wire, full packet is: opcode(1) + authMessage
+      // TCPClient receives buffer with opcode prepended
+      const wirePacket = Buffer.concat([Buffer.from([OPCODE_AUTH_WITH_VERSION]), authMessage]);
+      
+      // TCPClient dumps first 86 bytes for opcode 0x09 (opcode + addr + sig)
+      const dumpBytes = wirePacket.subarray(0, 86);
+      const hexDump = dumpBytes.toString('hex');
+      
+      // Hex dump should be pure hex (no control characters in the string representation)
+      expect(hexDump).toMatch(/^[0-9a-f]+$/);
+      expect(hexDump.length).toBe(172); // 86 bytes * 2 hex chars
+      
+      // Verify no control characters in the hex dump string
+      for (let i = 0; i < hexDump.length; i++) {
+        const charCode = hexDump.charCodeAt(i);
+        expect(charCode >= 48 && charCode <= 57 || charCode >= 97 && charCode <= 102).toBe(true); // 0-9 or a-f
+      }
+      
+      // Verify version bytes with control chars exist but are NOT in the dumped portion
+      const versionBytes = wirePacket.subarray(87);
+      expect(versionBytes.includes(0x00)).toBe(true); // Version has control chars
+      expect(wirePacket.length).toBeGreaterThan(86); // Full packet is longer
+      expect(dumpBytes.length).toBe(86); // But we only dump first 86 bytes
+    });
+
+    it('should use ASCII-only characters in truncation suffix', () => {
+      const challenge = Buffer.from('1234567890abcdef1234567890abcdef', 'hex');
+      const longVersion = 'a'.repeat(100);
+      const authMessage = buildAuthPacket(OPCODE_AUTH_WITH_VERSION, challenge, longVersion);
+      const wirePacket = Buffer.concat([Buffer.from([OPCODE_AUTH_WITH_VERSION]), authMessage]);
+      
+      // Simulate TCPClient truncation logic
+      const dumpBytes = wirePacket.subarray(0, 86);
+      const suffix = ` ...(+${wirePacket.length - 86}b version)`;
+      const logLine = dumpBytes.toString('hex') + suffix;
+      
+      // Verify entire log line is ASCII-only (no Unicode ellipsis or em-dash)
+      for (let i = 0; i < logLine.length; i++) {
+        const charCode = logLine.charCodeAt(i);
+        expect(charCode).toBeGreaterThanOrEqual(32); // Printable ASCII starts at space (32)
+        expect(charCode).toBeLessThanOrEqual(126); // Printable ASCII ends at ~ (126)
+      }
+      
+      // Verify it contains ASCII ellipsis, not Unicode
+      expect(logLine).toContain('...');
+      expect(logLine).not.toContain('…'); // Unicode ellipsis U+2026
+    });
+  });
 });

@@ -261,7 +261,7 @@ export class ASyncTCPService implements TCPCallback {
 
         const liveIdx = this.liveIndexForAddress(addrLower);
         if (liveIdx !== undefined && liveIdx !== index && !this.isQuiet(liveIdx)) {
-          console.log('Reject login #' + index, address, '— #' + liveIdx, 'still live');
+          console.log('Reject login #' + index, address, '-- #' + liveIdx, 'still live');
           client.terminate();
           return;
         }
@@ -340,7 +340,7 @@ export class ASyncTCPService implements TCPCallback {
           const addrLower = recoveredAddr.toLowerCase();
           const liveIdx = this.liveIndexForAddress(addrLower);
           if (liveIdx !== undefined && liveIdx !== index && !this.isQuiet(liveIdx)) {
-            console.log('Reject signed login #' + index, '— #' + liveIdx, 'still live');
+            console.log('Reject signed login #' + index, '-- #' + liveIdx, 'still live');
             client.terminate();
             return;
           }
