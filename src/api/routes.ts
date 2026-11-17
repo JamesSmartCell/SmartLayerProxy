@@ -177,8 +177,8 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
           wifi_attempts as wifiAttempts,
           connect_time_ms as connectTimeMs,
           network_index as networkIndex,
-          ssid_hash as ssidHash,
-          last_failure_stage as lastFailureStage
+          last_failure_stage as lastFailureStage,
+          wifi_disconnect_reason as wifiDisconnectReason
         FROM device_diagnostics
         WHERE id > ?
         ORDER BY id ASC

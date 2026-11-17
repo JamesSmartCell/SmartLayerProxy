@@ -51,8 +51,8 @@ export interface DeviceDiagnostics {
   wifiAttempts?: number;
   connectTimeMs?: number;
   networkIndex?: number;
-  ssidHash?: string;
   lastFailureStage?: string;
+  wifiDisconnectReason?: string;
 }
 
 export interface SilentDevice {
@@ -152,8 +152,8 @@ export class TelemetryService {
         wifi_attempts INTEGER,
         connect_time_ms INTEGER,
         network_index INTEGER,
-        ssid_hash TEXT,
-        last_failure_stage TEXT
+        last_failure_stage TEXT,
+        wifi_disconnect_reason TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_diagnostics_device ON device_diagnostics(device, timestamp DESC);
@@ -468,8 +468,8 @@ export class TelemetryService {
       wifiAttempts?: number;
       connectTimeMs?: number;
       networkIndex?: number;
-      ssidHash?: string;
       lastFailureStage?: string;
+      wifiDisconnectReason?: string;
     }
   ): void {
     const normalized = address.toLowerCase();
@@ -478,7 +478,7 @@ export class TelemetryService {
     const stmt = this.db.prepare(`
       INSERT INTO device_diagnostics (
         timestamp, device, reset_reason, boot_count, wifi_attempts,
-        connect_time_ms, network_index, ssid_hash, last_failure_stage
+        connect_time_ms, network_index, last_failure_stage, wifi_disconnect_reason
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
@@ -490,8 +490,8 @@ export class TelemetryService {
       diagnostics.wifiAttempts ?? null,
       diagnostics.connectTimeMs ?? null,
       diagnostics.networkIndex ?? null,
-      diagnostics.ssidHash ?? null,
-      diagnostics.lastFailureStage ?? null
+      diagnostics.lastFailureStage ?? null,
+      diagnostics.wifiDisconnectReason ?? null
     );
   }
 
@@ -505,8 +505,8 @@ export class TelemetryService {
         wifi_attempts as wifiAttempts,
         connect_time_ms as connectTimeMs,
         network_index as networkIndex,
-        ssid_hash as ssidHash,
-        last_failure_stage as lastFailureStage
+        last_failure_stage as lastFailureStage,
+        wifi_disconnect_reason as wifiDisconnectReason
       FROM device_diagnostics
       WHERE device = ?
       ORDER BY timestamp DESC

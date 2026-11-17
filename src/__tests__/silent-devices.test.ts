@@ -79,43 +79,43 @@ describe('Silent Device Detection', () => {
       const device = '0xabc123';
       
       telemetry.recordDeviceDiagnostics(device, {
-        resetReason: 'power_on',
+        resetReason: 'POWERON',
         bootCount: 42,
         wifiAttempts: 3,
         connectTimeMs: 1500,
         networkIndex: 0,
-        ssidHash: 'abc123',
         lastFailureStage: 'none',
+        wifiDisconnectReason: 'NO_AP_FOUND',
       });
       
       const diag = telemetry.getLatestDiagnostics(device);
       expect(diag).toBeDefined();
-      expect(diag?.resetReason).toBe('power_on');
+      expect(diag?.resetReason).toBe('POWERON');
       expect(diag?.bootCount).toBe(42);
       expect(diag?.wifiAttempts).toBe(3);
       expect(diag?.connectTimeMs).toBe(1500);
       expect(diag?.networkIndex).toBe(0);
-      expect(diag?.ssidHash).toBe('abc123');
       expect(diag?.lastFailureStage).toBe('none');
+      expect(diag?.wifiDisconnectReason).toBe('NO_AP_FOUND');
     });
 
     it('should return latest diagnostics for device', async () => {
       const device = '0xabc123';
       
       telemetry.recordDeviceDiagnostics(device, {
-        resetReason: 'power_on',
+        resetReason: 'POWERON',
         bootCount: 1,
       });
       
       await new Promise(resolve => setTimeout(resolve, 5));
       
       telemetry.recordDeviceDiagnostics(device, {
-        resetReason: 'software_reset',
+        resetReason: 'SW',
         bootCount: 2,
       });
       
       const diag = telemetry.getLatestDiagnostics(device);
-      expect(diag?.resetReason).toBe('software_reset');
+      expect(diag?.resetReason).toBe('SW');
       expect(diag?.bootCount).toBe(2);
     });
 
@@ -123,11 +123,11 @@ describe('Silent Device Detection', () => {
       const device = '0xabc123';
       
       telemetry.recordDeviceDiagnostics(device, {
-        resetReason: 'watchdog',
+        resetReason: 'WDT',
       });
       
       const diag = telemetry.getLatestDiagnostics(device);
-      expect(diag?.resetReason).toBe('watchdog');
+      expect(diag?.resetReason).toBe('WDT');
       expect(diag?.bootCount).toBeNull();
     });
   });
@@ -250,7 +250,7 @@ describe('Silent Device Detection', () => {
       ).run(oneHourAgo, device, 'connect', 'TCP');
       
       telemetry.recordDeviceDiagnostics(device, {
-        resetReason: 'watchdog',
+        resetReason: 'WDT',
         bootCount: 100,
       });
       
@@ -259,7 +259,7 @@ describe('Silent Device Detection', () => {
       });
       
       const silent = silentDevices.find(d => d.address === device);
-      expect(silent?.lastDiagnostics?.resetReason).toBe('watchdog');
+      expect(silent?.lastDiagnostics?.resetReason).toBe('WDT');
       expect(silent?.lastDiagnostics?.bootCount).toBe(100);
     });
 
