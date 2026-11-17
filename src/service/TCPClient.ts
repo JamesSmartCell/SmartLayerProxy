@@ -24,6 +24,9 @@ export class TCPClient {
   private clientIndex: number;
   private challenge: Buffer = Buffer.alloc(0);
   private isWaitingForResponse = false;
+  private firmwareVersion?: string;
+  private firmwareProject?: string;
+  private firmwareSemver?: string;
 
   constructor(socket: net.Socket, callback: TCPCallback, index: number) {
     this.socket = socket;
@@ -112,6 +115,24 @@ export class TCPClient {
 
   getAddress(): string {
     return this.address;
+  }
+
+  setFirmwareInfo(version: string, project?: string, semver?: string): void {
+    this.firmwareVersion = version;
+    this.firmwareProject = project;
+    this.firmwareSemver = semver;
+  }
+
+  getFirmwareVersion(): string | undefined {
+    return this.firmwareVersion;
+  }
+
+  getFirmwareProject(): string | undefined {
+    return this.firmwareProject;
+  }
+
+  getFirmwareSemver(): string | undefined {
+    return this.firmwareSemver;
   }
 
   getRemoteIp(): string {

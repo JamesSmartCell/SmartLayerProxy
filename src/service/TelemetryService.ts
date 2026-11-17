@@ -12,7 +12,7 @@ export interface DeviceEvent {
   id: number;
   timestamp: number;
   device: string;
-  eventType: 'connect' | 'disconnect' | 'api_call';
+  eventType: 'connect' | 'disconnect' | 'api_call' | 'firmware_notify';
   protocol?: 'UDP' | 'TCP';
   disconnectReason?: DisconnectReason;
   apiMethod?: string;
@@ -20,6 +20,8 @@ export interface DeviceEvent {
   apiResponseTime?: number;
   ipAddress?: string;
   firmwareVersion?: string;
+  firmwareProject?: string;
+  firmwareNotifyVersion?: string;
 }
 
 export interface DeviceMetrics {
@@ -186,6 +188,8 @@ export class TelemetryService {
       { name: 'api_response_time', type: 'INTEGER', added: 'initial' },
       { name: 'ip_address', type: 'TEXT', added: 'initial' },
       { name: 'firmware_version', type: 'TEXT', added: 'PR #2' },
+      { name: 'firmware_project', type: 'TEXT', added: 'firmware-notify' },
+      { name: 'firmware_notify_version', type: 'TEXT', added: 'firmware-notify' },
     ];
 
     // Add any missing columns
@@ -268,6 +272,21 @@ export class TelemetryService {
       VALUES (?, ?, 'api_call', ?, ?, ?)
     `);
     stmt.run(now, normalized, method, success ? 1 : 0, responseTimeMs);
+  }
+
+  recordFirmwareNotify(
+    address: string,
+    project: string,
+    version: string
+  ): void {
+    const normalized = address.toLowerCase();
+    const now = Date.now();
+
+    const stmt = this.db.prepare(`
+      INSERT INTO device_events (timestamp, device, event_type, firmware_project, firmware_notify_version)
+      VALUES (?, ?, 'firmware_notify', ?, ?)
+    `);
+    stmt.run(now, normalized, project, version);
   }
 
   getDeviceMetrics(address: string, since?: number): DeviceMetrics | undefined {
