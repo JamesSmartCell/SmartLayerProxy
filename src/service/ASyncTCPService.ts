@@ -490,26 +490,22 @@ export class ASyncTCPService implements TCPCallback {
   }
 
   async getResponse(address: string, method: string, argMap: MultiValueMap, _origin: string): Promise<string> {
-    const startTime = Date.now();
     const addrLower = address.toLowerCase();
     if (!this.clientMap.has(addrLower) && !this.addressToClient.has(addrLower)) {
       const knownAddrs = [...this.clientMap.keys()];
       console.log('No device found for', addrLower, '| Known TCP clients:', knownAddrs.length, knownAddrs);
-      this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
       return 'No device found';
     }
 
     const idx = this.clientMap.get(addrLower);
     if (idx === undefined) {
       console.log('Address in map but idx undefined (race?) for', addrLower);
-      this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
       return 'No device found';
     }
 
     const client = this.clientIndexList.get(idx);
     if (!client) {
       console.log('Client #' + idx + ' not in clientIndexList (disconnected?)');
-      this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
       return 'No device found';
     }
 
@@ -525,11 +521,9 @@ export class ASyncTCPService implements TCPCallback {
       await new Promise((r) => setTimeout(r, 100));
       const list = this.clientResponse.get(addrLower);
       if (list?.length) {
-        this.telemetry.recordApiCall(address, method, true, Date.now() - startTime);
         return list[0];
       }
     }
-    this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
     return 'Timed out';
   }
 
