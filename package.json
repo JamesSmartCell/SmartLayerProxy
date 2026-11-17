@@ -11,7 +11,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "typecheck:tools": "tsc --project tsconfig.tools.json --noEmit"
+    "typecheck:tools": "tsc --project tsconfig.tools.json --noEmit",
+    "telemetry:pull": "ts-node tools/telemetry/pull.ts",
+    "telemetry:analyse": "ts-node tools/telemetry/analyse.ts",
+    "firmware:upload": "ts-node tools/firmware/upload.ts"
   },
   "engines": {
     "node": ">=20.0.0"

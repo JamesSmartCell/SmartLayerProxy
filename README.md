@@ -306,34 +306,65 @@ TELEMETRY_RETENTION_DAYS=30
 
 ## CLI Tools
 
+All tools support `.env` files in multiple locations (checked in order):
+1. `tools/<tool-dir>/.env` (e.g., `tools/telemetry/.env`)
+2. `.env` (repo root)
+
+This lets you keep API keys separate per tool or share them across all tools.
+
 ### Telemetry Pull & Analyze
 
-**tools/telemetry/pull.ts** - Pages through `/api/telemetry/feed`, writes `data/telemetry-YYYYMMDD.jsonl`, optionally signs and sends ack.
+**Pull telemetry events from server:**
 
 ```bash
-# Requires .env with PROXY_BASE_URL, TELEMETRY_API_KEY, TELEMETRY_ADMIN_KEY (for --ack)
+# Using npm scripts (recommended)
+npm run telemetry:pull              # Pull events to data/telemetry-YYYYMMDD.jsonl
+npm run telemetry:pull -- --ack     # Pull and acknowledge (delete) events
+npm run telemetry:pull -- --dry-run # Pull with dry-run ack (test mode)
+
+# Or using ts-node directly
 ts-node tools/telemetry/pull.ts [--ack] [--dry-run]
 ```
 
-**tools/telemetry/analyse.ts** - Analyzes pulled data for reconnect storms, auth/signature failures, timeouts, slow/failing API methods. Attributes likely cause to proxy vs Web3E bridge vs device firmware. Outputs markdown report.
+Required `.env` variables:
+- `PROXY_BASE_URL` - Proxy server URL (e.g., `https://proxy.example.com`)
+- `TELEMETRY_API_KEY` - Bearer token for telemetry endpoints
+- `TELEMETRY_ADMIN_KEY` - Private key for signing (only needed with `--ack`)
+
+**Analyze telemetry data:**
 
 ```bash
+# Using npm scripts (recommended)
+npm run telemetry:analyse                              # Analyze latest file
+npm run telemetry:analyse -- data/telemetry-20261116.jsonl  # Analyze specific file
+
+# Or using ts-node directly
 ts-node tools/telemetry/analyse.ts [data/telemetry-YYYYMMDD.jsonl]
 ```
 
+Outputs markdown report with:
+- Per-device reconnect storms, auth/signature failures
+- Timeouts vs keepalive issues
+- Failing/slow API methods
+- Attribution: proxy vs Web3E TcpBridge/UdpBridge vs device firmware
+
 ### Firmware Upload
 
-**tools/firmware/upload.ts** - Signs and uploads firmware binary with admin authentication.
+**Upload firmware binary with admin signature:**
 
 ```bash
-# Requires .env with PROXY_BASE_URL, FIRMWARE_ADMIN_KEY
-ts-node tools/firmware/upload.ts <project> <version> <firmware.bin>
+# Using npm scripts (recommended)
+npm run firmware:upload GarageDoor 1.2.3 firmware.bin
 
-# Example
-ts-node tools/firmware/upload.ts GarageDoor 1.2.3 firmware.bin
+# Or using ts-node directly
+ts-node tools/firmware/upload.ts <project> <version> <firmware.bin>
 ```
 
-Computes SHA256, gets challenge nonce, signs `firmware:<project>:<version>:<sha256>:<nonce>`, uploads to proxy.
+Required `.env` variables:
+- `PROXY_BASE_URL` - Proxy server URL
+- `FIRMWARE_ADMIN_KEY` - Private key for signing admin operations
+
+The tool computes SHA256, gets challenge nonce, signs `firmware:<project>:<version>:<sha256>:<nonce>`, and uploads to proxy.
 
 ## Resource Usage
 
