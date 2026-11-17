@@ -51,7 +51,23 @@ export class TCPClient {
         const preview = buffer.subarray(0, 4).toString('hex');
         const peer = this.getRemoteIp() || '?';
         console.log('Receive Command:', preview, '#' + this.clientIndex, peer);
-        const dump = buffer.length <= 96 ? buffer.toString('hex') : buffer.subarray(0, 96).toString('hex') + `…(+${buffer.length - 96}b)`;
+        
+        // For opcode 0x09 (auth with version), exclude version bytes from dump
+        // to avoid non-printable characters in terminal. Dump only: opcode(1) + addr(20) + sig(65) = 86 bytes
+        const opcode = buffer[0];
+        const OPCODE_AUTH_WITH_VERSION = 0x09;
+        let dumpBuffer = buffer;
+        let suffix = '';
+        
+        if (opcode === OPCODE_AUTH_WITH_VERSION && buffer.length > 86) {
+          dumpBuffer = buffer.subarray(0, 86);
+          suffix = ` …(+${buffer.length - 86}b version)`;
+        } else if (buffer.length > 96) {
+          dumpBuffer = buffer.subarray(0, 96);
+          suffix = ` …(+${buffer.length - 96}b)`;
+        }
+        
+        const dump = dumpBuffer.toString('hex') + suffix;
         console.log('  -->', dump, '#' + this.clientIndex, peer);
         this.isWaitingForResponse = false;
         this.lastConnection = Date.now();
