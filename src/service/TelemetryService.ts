@@ -96,6 +96,7 @@ export class TelemetryService {
   }
 
   private initDatabase(): void {
+    // Create table with initial schema
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS device_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,8 +108,7 @@ export class TelemetryService {
         api_method TEXT,
         api_success INTEGER,
         api_response_time INTEGER,
-        ip_address TEXT,
-        firmware_version TEXT
+        ip_address TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_device_timestamp ON device_events(device, timestamp);
@@ -116,6 +116,34 @@ export class TelemetryService {
       CREATE INDEX IF NOT EXISTS idx_event_type ON device_events(event_type);
       CREATE INDEX IF NOT EXISTS idx_id ON device_events(id);
     `);
+
+    // Migrate schema: add missing columns (idempotent)
+    this.migrateSchema();
+  }
+
+  private migrateSchema(): void {
+    // Check existing columns in device_events table
+    const columns = this.db.prepare('PRAGMA table_info(device_events)').all() as Array<{ name: string }>;
+    const columnNames = new Set(columns.map(col => col.name));
+
+    // Define expected schema with columns that may have been added over time
+    const requiredColumns = [
+      { name: 'protocol', type: 'TEXT', added: 'initial' },
+      { name: 'disconnect_reason', type: 'TEXT', added: 'initial' },
+      { name: 'api_method', type: 'TEXT', added: 'initial' },
+      { name: 'api_success', type: 'INTEGER', added: 'initial' },
+      { name: 'api_response_time', type: 'INTEGER', added: 'initial' },
+      { name: 'ip_address', type: 'TEXT', added: 'initial' },
+      { name: 'firmware_version', type: 'TEXT', added: 'PR #2' },
+    ];
+
+    // Add any missing columns
+    for (const col of requiredColumns) {
+      if (!columnNames.has(col.name)) {
+        console.log(`[Telemetry] Migrating schema: adding ${col.name} column (${col.added})`);
+        this.db.exec(`ALTER TABLE device_events ADD COLUMN ${col.name} ${col.type}`);
+      }
+    }
   }
 
   private startCleanupSchedule(): void {
