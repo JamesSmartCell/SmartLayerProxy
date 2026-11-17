@@ -61,10 +61,10 @@ export class TCPClient {
         
         if (opcode === OPCODE_AUTH_WITH_VERSION && buffer.length > 86) {
           dumpBuffer = buffer.subarray(0, 86);
-          suffix = ` …(+${buffer.length - 86}b version)`;
+          suffix = ` ...(+${buffer.length - 86}b version)`;
         } else if (buffer.length > 96) {
           dumpBuffer = buffer.subarray(0, 96);
-          suffix = ` …(+${buffer.length - 96}b)`;
+          suffix = ` ...(+${buffer.length - 96}b)`;
         }
         
         const dump = dumpBuffer.toString('hex') + suffix;

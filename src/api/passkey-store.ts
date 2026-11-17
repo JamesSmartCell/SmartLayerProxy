@@ -95,13 +95,13 @@ export class PasskeyStore {
   private load(): StoreFile {
     try {
       if (!existsSync(this.path)) {
-        console.log(`[PasskeyStore] No store at ${this.path} — starting empty`);
+        console.log(`[PasskeyStore] No store at ${this.path} -- starting empty`);
         return emptyStore();
       }
       const raw = readFileSync(this.path, 'utf-8');
       const parsed = JSON.parse(raw) as StoreFile;
       if (!parsed || parsed.version !== 1) {
-        console.warn('[PasskeyStore] Unknown store version — starting empty');
+        console.warn('[PasskeyStore] Unknown store version -- starting empty');
         return emptyStore();
       }
       parsed.credentials = parsed.credentials || {};
@@ -110,7 +110,7 @@ export class PasskeyStore {
       console.log(`[PasskeyStore] Loaded ${n} credential(s) from ${this.path}`);
       return parsed;
     } catch (err) {
-      console.error('[PasskeyStore] Failed to load — starting empty:', err);
+      console.error('[PasskeyStore] Failed to load -- starting empty:', err);
       return emptyStore();
     }
   }

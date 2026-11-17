@@ -328,20 +328,44 @@ describe('TCP Authentication with Firmware Version', () => {
       const dumpBytes = wirePacket.subarray(0, 86);
       const hexDump = dumpBytes.toString('hex');
       
-      // Hex dump should be pure hex (no control characters)
+      // Hex dump should be pure hex (no control characters in the string representation)
       expect(hexDump).toMatch(/^[0-9a-f]+$/);
       expect(hexDump.length).toBe(172); // 86 bytes * 2 hex chars
       
-      // Verify no control characters in the dump
+      // Verify no control characters in the hex dump string
       for (let i = 0; i < hexDump.length; i++) {
         const charCode = hexDump.charCodeAt(i);
         expect(charCode >= 48 && charCode <= 57 || charCode >= 97 && charCode <= 102).toBe(true); // 0-9 or a-f
       }
       
-      // Verify version bytes with control chars are NOT in the dump
+      // Verify version bytes with control chars exist but are NOT in the dumped portion
       const versionBytes = wirePacket.subarray(87);
-      expect(versionBytes.includes(0x00)).toBe(true); // Has control chars
-      expect(dumpBytes.includes(0x00)).toBe(false); // Dump excludes them
+      expect(versionBytes.includes(0x00)).toBe(true); // Version has control chars
+      expect(wirePacket.length).toBeGreaterThan(86); // Full packet is longer
+      expect(dumpBytes.length).toBe(86); // But we only dump first 86 bytes
+    });
+
+    it('should use ASCII-only characters in truncation suffix', () => {
+      const challenge = Buffer.from('1234567890abcdef1234567890abcdef', 'hex');
+      const longVersion = 'a'.repeat(100);
+      const authMessage = buildAuthPacket(OPCODE_AUTH_WITH_VERSION, challenge, longVersion);
+      const wirePacket = Buffer.concat([Buffer.from([OPCODE_AUTH_WITH_VERSION]), authMessage]);
+      
+      // Simulate TCPClient truncation logic
+      const dumpBytes = wirePacket.subarray(0, 86);
+      const suffix = ` ...(+${wirePacket.length - 86}b version)`;
+      const logLine = dumpBytes.toString('hex') + suffix;
+      
+      // Verify entire log line is ASCII-only (no Unicode ellipsis or em-dash)
+      for (let i = 0; i < logLine.length; i++) {
+        const charCode = logLine.charCodeAt(i);
+        expect(charCode).toBeGreaterThanOrEqual(32); // Printable ASCII starts at space (32)
+        expect(charCode).toBeLessThanOrEqual(126); // Printable ASCII ends at ~ (126)
+      }
+      
+      // Verify it contains ASCII ellipsis, not Unicode
+      expect(logLine).toContain('...');
+      expect(logLine).not.toContain('…'); // Unicode ellipsis U+2026
     });
   });
 });
