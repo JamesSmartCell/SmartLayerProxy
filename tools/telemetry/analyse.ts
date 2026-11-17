@@ -11,13 +11,30 @@
  * - Attribution: proxy vs Web3E TcpBridge/UdpBridge vs device firmware
  * 
  * Usage:
- *   ts-node tools/telemetry/analyse.ts [data/telemetry-YYYYMMDD.jsonl] [--api-url=http://localhost:8081] [--api-key=...]
+ *   npm run telemetry:analyse [-- data/telemetry-YYYYMMDD.jsonl] [--api-url=http://localhost:8081] [--api-key=...]
+ *   OR: ts-node tools/telemetry/analyse.ts [data/telemetry-YYYYMMDD.jsonl] [--api-url=...] [--api-key=...]
+ * 
+ * For silent device analysis, provide --api-url and --api-key flags.
+ * These can also be set in tools/telemetry/.env as TELEMETRY_API_URL and TELEMETRY_API_KEY.
  * 
  * Outputs markdown report to stdout
  */
 
-import { readFileSync, readdirSync } from 'fs';
+import { config } from 'dotenv';
+import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
+
+// Try loading .env from multiple locations
+const envPaths = [
+  join(__dirname, '.env'),                    // tools/telemetry/.env
+  join(__dirname, '..', '..', '.env'),        // repo root .env
+];
+for (const envPath of envPaths) {
+  if (existsSync(envPath)) {
+    config({ path: envPath });
+    break;
+  }
+}
 
 interface Event {
   id: number;
@@ -478,6 +495,10 @@ function parseArgs(): { inputFile?: string; apiUrl?: string; apiKey?: string } {
       inputFile = arg;
     }
   }
+
+  // Fall back to environment variables if not provided via CLI
+  if (!apiUrl) apiUrl = process.env.TELEMETRY_API_URL;
+  if (!apiKey) apiKey = process.env.TELEMETRY_API_KEY;
 
   return { inputFile, apiUrl, apiKey };
 }
