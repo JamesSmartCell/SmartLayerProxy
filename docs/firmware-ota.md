@@ -10,6 +10,18 @@ The OTA update flow consists of three main steps:
 2. **Notify**: Notify devices that an update is available
 3. **Download**: Devices download and flash the firmware
 
+## Configuration
+
+Firmware OTA requires the following environment variables:
+
+- `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`: Cloudflare R2 credentials
+- `R2_FIRMWARE_BUCKET_NAME`: Bucket name for firmware storage (optional, defaults to `R2_BUCKET_NAME`)
+- `R2_FIRMWARE_PUBLIC_URL`: Public URL for the firmware bucket (e.g., `https://pub-xxxx.r2.dev`)
+  - If not set, falls back to `R2_PUBLIC_URL`
+  - If neither is set, uses the private `r2.cloudflarestorage.com` endpoint (devices won't be able to download)
+
+When using a separate firmware bucket (`R2_FIRMWARE_BUCKET_NAME`), you must configure `R2_FIRMWARE_PUBLIC_URL` or `R2_PUBLIC_URL` to allow devices to download firmware. The proxy will log a warning at first firmware upload if no public URL is configured.
+
 ## Firmware Version Format
 
 ### Device Firmware Version String

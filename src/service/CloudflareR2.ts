@@ -6,6 +6,7 @@
  *   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
  *   R2_PUBLIC_URL (e.g. https://pub-xxx.r2.dev or custom domain)
  *   R2_FIRMWARE_BUCKET_NAME (optional, defaults to R2_BUCKET_NAME)
+ *   R2_FIRMWARE_PUBLIC_URL (optional, public URL for firmware bucket)
  */
 
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
@@ -17,8 +18,10 @@ const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY || '';
 const bucketName = process.env.R2_BUCKET_NAME || 'garage-camera';
 const firmwareBucketName = process.env.R2_FIRMWARE_BUCKET_NAME || bucketName;
 const publicBaseUrl = process.env.R2_PUBLIC_URL || ''; // e.g. https://pub-xxx.r2.dev
+const firmwarePublicBaseUrl = process.env.R2_FIRMWARE_PUBLIC_URL || '';
 
 let s3Client: S3Client | null = null;
+let hasLoggedFirmwareUrlWarning = false;
 
 function getClient(): S3Client | null {
   if (!accountId || !accessKeyId || !secretAccessKey) {
@@ -64,16 +67,26 @@ export async function createPresignedUploadUrl(key: string): Promise<string | nu
  * @param body - Buffer to upload
  * @param contentType - MIME type (default: 'image/jpeg' for backward compatibility with camera uploads)
  * @param bucket - Optional bucket override (defaults to R2_BUCKET_NAME)
+ * @param publicBaseUrlOverride - Optional public base URL override for this upload
  */
 export async function uploadToR2(
   key: string,
   body: Buffer,
   contentType = 'image/jpeg',
-  bucket?: string
+  bucket?: string,
+  publicBaseUrlOverride?: string
 ): Promise<string | null> {
   const client = getClient();
   if (!client) return null;
   const targetBucket = bucket || bucketName;
+  
+  if (targetBucket === firmwareBucketName && firmwareBucketName !== bucketName) {
+    if (!hasLoggedFirmwareUrlWarning && !firmwarePublicBaseUrl && !publicBaseUrl) {
+      console.warn('[R2] Warning: R2_FIRMWARE_BUCKET_NAME is set but neither R2_FIRMWARE_PUBLIC_URL nor R2_PUBLIC_URL is configured. Devices will not be able to download firmware from the private storage endpoint.');
+      hasLoggedFirmwareUrlWarning = true;
+    }
+  }
+  
   try {
     await client.send(
       new PutObjectCommand({
@@ -83,8 +96,13 @@ export async function uploadToR2(
         ContentType: contentType,
       })
     );
-    if (publicBaseUrl) {
-      const base = publicBaseUrl.replace(/\/$/, '');
+    
+    const effectivePublicUrl = publicBaseUrlOverride 
+      || (targetBucket === firmwareBucketName ? firmwarePublicBaseUrl : '')
+      || publicBaseUrl;
+    
+    if (effectivePublicUrl) {
+      const base = effectivePublicUrl.replace(/\/$/, '');
       return `${base}/${key}`;
     }
     return `https://${accountId}.r2.cloudflarestorage.com/${targetBucket}/${key}`;
