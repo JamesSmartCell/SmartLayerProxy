@@ -972,6 +972,7 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
 
   // ========== IoT device routes ==========
   async function handleApiCall(req: Request, res: Response, asyncPath: boolean): Promise<void> {
+    const startTime = Date.now();
     const address = normalizeAddress(req.params.Address);
     const method = req.params.method;
     const clientIp = getClientIp(req);
@@ -993,7 +994,28 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
       tcpService.getResponse(address, method, argMap, clientDesignator),
     ]);
 
-    const response = responseTCP ?? responseUDP;
+    // Prefer successful responses over error messages
+    const isSuccess = (r: string) => 
+      r !== 'No device found' && 
+      r !== 'Timed out' && 
+      r !== 'API send error' &&
+      r !== '';
+    
+    let response: string;
+    if (isSuccess(responseTCP)) {
+      response = responseTCP;
+    } else if (isSuccess(responseUDP)) {
+      response = responseUDP;
+    } else {
+      // Both failed, prefer TCP error message
+      response = responseTCP ?? responseUDP;
+    }
+    
+    const responseTime = Date.now() - startTime;
+    const success = isSuccess(response);
+    
+    telemetry.recordApiCall(address, method, success, responseTime);
+    
     res.status(201).send(response);
   }
 

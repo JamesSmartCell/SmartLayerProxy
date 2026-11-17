@@ -29,10 +29,8 @@ export class ASyncService {
   }
 
   async getResponse(address: string, method: string, argMap: MultiValueMap, origin: string): Promise<string> {
-    const startTime = Date.now();
     let instance = this.getLatestClient(address.toLowerCase());
     if (!instance) {
-      this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
       return 'No device found';
     }
 
@@ -46,7 +44,6 @@ export class ASyncService {
     }
 
     if (methodId === -1) {
-      this.telemetry.recordApiCall(address, method, false, Date.now() - startTime);
       return 'API send error';
     }
 
@@ -68,10 +65,6 @@ export class ASyncService {
     }
 
     const response = instance?.getResponse(methodId) ?? (resendCount === 0 ? 'Timed out' : '');
-    const responseTime = Date.now() - startTime;
-    const success = resendCount > 0 && response !== 'Timed out';
-
-    this.telemetry.recordApiCall(address, method, success, responseTime);
 
     if (resendCount === 0) {
       console.log('Timed out');

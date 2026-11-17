@@ -114,6 +114,57 @@ function parseJsonlFile(path: string): Event[] {
     .map(line => JSON.parse(line));
 }
 
+/**
+ * Deduplicate API call events from historical data that were double-recorded
+ * before the telemetry fix. Removes false/0 events followed by true events
+ * for the same device+method within ~5 seconds.
+ * 
+ * NOTE: This is a heuristic for historical data cleanup. New telemetry
+ * recording (post-fix) ensures exactly one event per call.
+ */
+function deduplicateApiCallEvents(events: Event[]): Event[] {
+  const deduplicated: Event[] = [];
+  let skipNext = new Set<number>();
+  
+  for (let i = 0; i < events.length; i++) {
+    if (skipNext.has(i)) continue;
+    
+    const event = events[i];
+    
+    // Only process api_call events
+    if (event.eventType !== 'api_call') {
+      deduplicated.push(event);
+      continue;
+    }
+    
+    // Look for potential duplicate: false/0 followed by true within 5s
+    if (event.apiSuccess === false && event.apiResponseTime === 0 && i + 1 < events.length) {
+      const nextEvent = events[i + 1];
+      
+      // Check if next event is a matching successful call
+      if (nextEvent.eventType === 'api_call' &&
+          nextEvent.device === event.device &&
+          nextEvent.apiMethod === event.apiMethod &&
+          nextEvent.apiSuccess === true &&
+          (nextEvent.timestamp - event.timestamp) < 5000) {
+        
+        // Skip the false/0 event, keep only the successful one
+        skipNext.add(i);
+        continue;
+      }
+    }
+    
+    deduplicated.push(event);
+  }
+  
+  const removed = events.length - deduplicated.length;
+  if (removed > 0) {
+    console.error(`Deduplicated ${removed} historical duplicate api_call events\n`);
+  }
+  
+  return deduplicated;
+}
+
 function analyzeDevice(events: Event[]): DeviceAnalysis {
   const sessions: DeviceSession[] = [];
   let currentSession: DeviceSession | null = null;
@@ -518,8 +569,11 @@ async function main() {
   }
 
   console.error(`Analyzing: ${inputFile}\n`);
-  const events = parseJsonlFile(inputFile);
+  let events = parseJsonlFile(inputFile);
   console.error(`Loaded ${events.length} events\n`);
+  
+  // Deduplicate historical double-recorded API calls
+  events = deduplicateApiCallEvents(events);
 
   const deviceEvents = new Map<string, Event[]>();
   for (const event of events) {
