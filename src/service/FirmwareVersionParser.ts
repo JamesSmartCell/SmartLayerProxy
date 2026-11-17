@@ -16,7 +16,7 @@ export interface ParsedFirmwareVersion {
   patch: number;
 }
 
-const FIRMWARE_VERSION_REGEX = /^([a-z0-9_-]+)@(\d+\.\d+\.\d+)(?:\+([a-f0-9]+))?$/i;
+const FIRMWARE_VERSION_REGEX = /^([a-z0-9_-]+)@(\d+\.\d+\.\d+)(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/i;
 const PLAIN_SEMVER_REGEX = /^v?(\d+)\.(\d+)\.(\d+)$/;
 
 export class FirmwareVersionParser {
@@ -66,13 +66,13 @@ export class FirmwareVersionParser {
     }
 
     // Try full device format: project@semver+hash
-    const fullMatch = versionString.match(/^[a-z0-9_-]+@(\d+\.\d+\.\d+)(?:\+[a-z0-9]+)?$/i);
+    const fullMatch = versionString.match(/^[a-z0-9_-]+@(\d+\.\d+\.\d+)(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/i);
     if (fullMatch) {
       return fullMatch[1];
     }
 
     // Try semver with build suffix: semver+hash (any alphanumeric suffix)
-    const buildMatch = versionString.match(/^(\d+\.\d+\.\d+)\+[a-z0-9]+$/i);
+    const buildMatch = versionString.match(/^(\d+\.\d+\.\d+)\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*$/i);
     if (buildMatch) {
       return buildMatch[1];
     }
