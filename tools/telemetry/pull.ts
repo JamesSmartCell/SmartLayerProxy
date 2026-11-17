@@ -6,12 +6,17 @@
  * Optionally acknowledges (deletes) events from server after successful pull using admin signature
  * 
  * Usage:
- *   ts-node tools/telemetry/pull.ts [--ack] [--dry-run]
+ *   npm run telemetry:pull [-- --ack] [-- --dry-run]
+ *   OR: ts-node tools/telemetry/pull.ts [--ack] [--dry-run]
  * 
  * Requires .env with:
  *   PROXY_BASE_URL=https://your-proxy.com
  *   TELEMETRY_API_KEY=your-api-key
  *   TELEMETRY_ADMIN_KEY=0x... (private key, only for --ack)
+ * 
+ * .env locations (checked in order):
+ *   1. tools/telemetry/.env
+ *   2. .env (repo root)
  */
 
 import { config } from 'dotenv';
@@ -19,7 +24,18 @@ import { existsSync, mkdirSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import { Wallet } from 'ethers';
 
-config({ path: join(__dirname, '..', '..', '.env') });
+// Try loading .env from multiple locations
+const envPaths = [
+  join(__dirname, '.env'),                    // tools/telemetry/.env
+  join(__dirname, '..', '..', '.env'),        // repo root .env
+];
+
+for (const envPath of envPaths) {
+  if (existsSync(envPath)) {
+    config({ path: envPath });
+    break;
+  }
+}
 
 const PROXY_BASE_URL = process.env.PROXY_BASE_URL || 'http://localhost:8081';
 const TELEMETRY_API_KEY = process.env.TELEMETRY_API_KEY || '';
