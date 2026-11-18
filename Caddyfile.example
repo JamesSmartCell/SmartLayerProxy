@@ -16,3 +16,19 @@
         respond 403
     }
 }
+
+# Zigbee gateway diagnostics hostname
+# Devices POST to https://zigbeediagnostics.percolate.one/api/diag/zbgw
+# Routes are Host-independent; reverse_proxy the same upstream as scriptproxy.
+#
+# zigbeediagnostics.percolate.one {
+#     handle /api* {
+#         reverse_proxy localhost:8081
+#     }
+#     handle {
+#         respond 403
+#     }
+# }
+#
+# Or, if scriptproxy already uses a named upstream / site block, point both
+# hostnames at that same reverse_proxy target.

@@ -14,6 +14,9 @@
     "typecheck:tools": "tsc --project tsconfig.tools.json --noEmit",
     "telemetry:pull": "ts-node tools/telemetry/pull.ts",
     "telemetry:analyse": "ts-node tools/telemetry/analyse.ts",
+    "telemetry:zigbee:pull": "ts-node tools/telemetry/pull-zigbee.ts",
+    "telemetry:zigbee:analyse": "ts-node tools/telemetry/analyse-zigbee.ts",
+    "telemetry:all": "ts-node tools/telemetry/all.ts",
     "firmware:upload": "ts-node tools/firmware/upload.ts"
   },
   "engines": {

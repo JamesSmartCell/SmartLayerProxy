@@ -14,6 +14,9 @@ export interface Config {
   telemetryFeedMaxLimit: number;
   firmwareUploadMaxSizeMb: number;
   trustProxy: boolean;
+  /** Comma-separated shared product tokens for Zigbee gateway diagnostics (X-ZBGW-Diag). */
+  zbgwDiagTokens: string[];
+  zigbeeDbPath: string;
 }
 
 function loadProperties(): Record<string, string> {
@@ -53,11 +56,12 @@ function parseAddressList(value?: string): string[] {
 
 export function loadConfig(): Config {
   const props = loadProperties();
+  const telemetryDbPath = process.env.TELEMETRY_DB_PATH || props['telemetry.db.path'] || './data/telemetry.db';
   return {
     serverPort: parseInt(props['server.port'] || '8081', 10),
     udpPort: parseInt(props['udp.port'] || '8083', 10),
     tcpPort: parseInt(props['tcp.port'] || '8082', 10),
-    telemetryDbPath: process.env.TELEMETRY_DB_PATH || props['telemetry.db.path'] || './data/telemetry.db',
+    telemetryDbPath,
     telemetryRetentionDays: parseInt(process.env.TELEMETRY_RETENTION_DAYS || props['telemetry.retention.days'] || '30', 10),
     telemetryApiKey: process.env.TELEMETRY_API_KEY || props['telemetry.api.key'],
     telemetryAdminAddresses: parseAddressList(
@@ -74,5 +78,12 @@ export function loadConfig(): Config {
       process.env.FIRMWARE_UPLOAD_MAX_SIZE_MB || props['firmware.upload.max.size.mb'] || '10', 10
     ),
     trustProxy: (process.env.TRUST_PROXY || props['trust.proxy'] || 'false').toLowerCase() === 'true',
+    zbgwDiagTokens: parseAddressList(
+      process.env.ZBGW_DIAG_TOKENS || props['zbgw.diag.tokens']
+    ),
+    zigbeeDbPath:
+      process.env.ZIGBEE_DB_PATH ||
+      props['zigbee.db.path'] ||
+      telemetryDbPath.replace(/telemetry\.db$/, 'zigbee.db'),
   };
 }
