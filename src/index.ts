@@ -5,10 +5,12 @@ import { ASyncService } from './service/ASyncService';
 import { ASyncTCPService } from './service/ASyncTCPService';
 import { loadConfig } from './config';
 import { TelemetryService } from './service/TelemetryService';
+import { ZigbeeDiagnosticsService } from './service/ZigbeeDiagnosticsService';
 
 const config = loadConfig();
 
 TelemetryService.getInstance(config.telemetryDbPath, config.telemetryRetentionDays);
+ZigbeeDiagnosticsService.getInstance(config.zigbeeDbPath, config.telemetryRetentionDays);
 
 const app = express();
 const service = new ASyncService();

@@ -41,6 +41,10 @@ Environment variables (or `application.properties` file):
   - `TELEMETRY_FEED_MAX_LIMIT` - Maximum feed limit (default: 5000)
   - `TELEMETRY_ACK_ENABLED` - Enable actual deletion via ack (default: false; when false, ack is forced dry-run)
 
+- **Zigbee gateway diagnostics:**
+  - `ZBGW_DIAG_TOKENS` - Comma-separated product tokens for device `X-ZBGW-Diag` header (REQUIRED for `/api/diag/zbgw`)
+  - `ZIGBEE_DB_PATH` - Optional SQLite path (default: sibling of telemetry DB → `zigbee.db`)
+
 - **Admin Authentication:**
   - `ADMIN_ADDRESSES` - Comma-separated Ethereum addresses authorized for admin operations
   - `TELEMETRY_ADMIN_ADDRESSES` - Additional addresses authorized for telemetry ack
@@ -75,9 +79,65 @@ Admin-protected operations require a signed challenge. The flow:
 1. **GET /api/admin/challenge** - Returns `{nonce, expiresAt}` (nonce valid 60s)
 2. Client signs EIP-191 personal_sign message: `<action>:<params>:<nonce>`
    - For ack: `ack:<upToId>:<nonce>`
+   - For Zigbee ack: `zbgw-ack:<upToId>:<nonce>`
+   - For Zigbee command queue: `zbgw-cmd:<mac>:<action>:<nonce>` (`restart` | `ota_check`)
    - For firmware upload: `firmware:<project>:<version>:<sha256>:<nonce>`
    - For firmware rollback: `current:<project>:<version>:<nonce>`
 3. Submit signature with request (nonce is single-use and burned after verification)
+
+### Zigbee Gateway Diagnostics
+
+Host-independent routes used by ESP32-C6 gateways (firmware `diag.c`). Devices may call
+`https://zigbeediagnostics.percolate.one/api/diag/zbgw` (Caddy reverse-proxies that hostname
+to the same upstream as `scriptproxy.percolate.one`).
+
+**POST /api/diag/zbgw** (device)
+
+Auth: header `X-ZBGW-Diag: <token>` must match one of `ZBGW_DIAG_TOKENS` (constant-time compare).
+Payload capped at 64KB. Arbitrary extra fields are stored as JSON (watchdog counters, reset
+reason, recovery stage, unknown-device descriptor dumps, etc.).
+
+Example body (matches firmware wire format):
+```json
+{
+  "device_id": "aabbccddeeff",
+  "fw": "1.2.3",
+  "kind": "boot|error|ok|poll|device|device-added",
+  "ok": true,
+  "uptime_s": 120,
+  "reset": "power|software|panic|watchdog|brownout|sleep|other",
+  "heap": 120000,
+  "wifi_rssi": -55,
+  "mqtt_ok": true,
+  "zigbee_ok": true,
+  "devices": 2,
+  "code": "boot",
+  "message": "Gateway started"
+}
+```
+
+Response (pending admin-queued commands are delivered once, then marked delivered):
+```json
+{ "commands": [{ "action": "restart" }] }
+```
+
+**Admin reads** (Bearer `TELEMETRY_API_KEY`, same as `/telemetry/*`):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/diag/zbgw/gateways` | List known gateways (mac, fw, first/last seen, last IP, status) |
+| `GET /api/diag/zbgw/events?afterId=&limit=` | Event feed with after-id paging |
+| `POST /api/diag/zbgw/ack` | Ack/delete events up to id (`zbgw-ack:<upToId>:<nonce>`; respects `TELEMETRY_ACK_ENABLED`) |
+| `POST /api/diag/zbgw/commands` | Queue `restart` or `ota_check` (`zbgw-cmd:<mac>:<action>:<nonce>`) |
+
+SQLite tables live in `zigbee.db` next to the telemetry DB (`zigbee_gateways`, `zigbee_events`,
+`zigbee_commands`) with auto-migrating schema. Columns `device_pubkey` / `auth_approved` are
+reserved for a future per-device P-256 signing scheme (admin-approved pubkey); not implemented yet.
+
+**OTA:** Upload project `zigbee-gateway` via the existing firmware coordinator /
+`npm run firmware:upload zigbee-gateway <semver> firmware.bin`. Devices (or tooling) can query
+`GET /api/firmware/zigbee-gateway/latest` → `{version,url,sha256,size}`. No special-casing beyond
+the project name.
 
 ### Telemetry Feed & Acknowledgement
 
@@ -348,6 +408,15 @@ Outputs markdown report with:
 - Failing/slow API methods
 - Attribution: proxy vs Web3E TcpBridge/UdpBridge vs device firmware
 
+**Zigbee diagnostics pull & analyse:**
+
+```bash
+npm run telemetry:zigbee:pull                 # → data/zigbee-YYYYMMDD.jsonl (no ack)
+npm run telemetry:zigbee:pull -- --ack        # Pull + ack (only when --ack passed)
+npm run telemetry:zigbee:analyse              # Silent gateways, watchdog, Wi-Fi/MQTT flaps, OTA failures, unknown-device dumps
+npm run telemetry:all                         # SmartLayer pull+analyse, then Zigbee pull+analyse
+```
+
 ### Firmware Upload
 
 **Upload firmware binary with admin signature:**
@@ -355,6 +424,7 @@ Outputs markdown report with:
 ```bash
 # Using npm scripts (recommended)
 npm run firmware:upload GarageDoor 1.2.3 firmware.bin
+npm run firmware:upload zigbee-gateway 1.2.3 firmware.bin
 
 # Or using ts-node directly
 ts-node tools/firmware/upload.ts <project> <version> <firmware.bin>

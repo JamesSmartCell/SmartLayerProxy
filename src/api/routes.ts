@@ -7,6 +7,11 @@ import { randomUUID } from 'crypto';
 import { TelemetryService } from '../service/TelemetryService';
 import { FirmwareService } from '../service/FirmwareService';
 import { AdminAuthService } from '../service/AdminAuthService';
+import {
+  ZigbeeDiagnosticsService,
+  ZBGW_MAX_PAYLOAD_BYTES,
+  isAllowedAction,
+} from '../service/ZigbeeDiagnosticsService';
 import { loadConfig } from '../config';
 import { FirmwareVersionParser } from '../service/FirmwareVersionParser';
 
@@ -74,6 +79,36 @@ function telemetryAuthMiddleware(req: Request, res: Response, next: NextFunction
   next();
 }
 
+function zbgwTokenMatches(provided: string | undefined, tokens: string[]): boolean {
+  if (!provided || tokens.length === 0) {
+    return false;
+  }
+  let matched = false;
+  for (const token of tokens) {
+    if (AdminAuthService.constantTimeCompare(provided, token)) {
+      matched = true;
+    }
+  }
+  return matched;
+}
+
+function zbgwDiagAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const config = loadConfig();
+
+  if (config.zbgwDiagTokens.length === 0) {
+    res.status(503).json({ error: 'Zigbee diagnostics endpoints are disabled' });
+    return;
+  }
+
+  const token = req.get('X-ZBGW-Diag') || undefined;
+  if (!zbgwTokenMatches(token, config.zbgwDiagTokens)) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  next();
+}
+
 function getAdminAddresses(): string[] {
   const config = loadConfig();
   return [...config.adminAddresses, ...config.telemetryAdminAddresses];
@@ -84,6 +119,14 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
   const telemetry = TelemetryService.getInstance();
   const adminAuth = AdminAuthService.getInstance();
   const config = loadConfig();
+
+  let zigbee: ZigbeeDiagnosticsService | null = null;
+  try {
+    // Initialized in index.ts (or tests); do not create a side-effect DB here.
+    zigbee = ZigbeeDiagnosticsService.getInstance();
+  } catch (err) {
+    console.warn('[ZigbeeDiag] Service not initialized:', err);
+  }
   
   let firmware: FirmwareService | null = null;
   try {
@@ -100,7 +143,7 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
     res.set('Access-Control-Max-Age', '10000');
     res.set('Access-Control-Allow-Credentials', 'false');
     res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-ZBGW-Diag');
     if (req.method === 'OPTIONS') {
       res.status(204).end();
       return;
@@ -936,6 +979,221 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
       res.json({ success: true, address });
     } catch (err) {
       console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  // ========== Zigbee gateway diagnostics ==========
+  // Device POST path matches firmware (diag.c): Host header independent.
+  router.post('/diag/zbgw', zbgwDiagAuthMiddleware, (req, res) => {
+    try {
+      if (!zigbee) {
+        res.status(503).json({ error: 'Zigbee diagnostics service not initialized' });
+        return;
+      }
+
+      const body = req.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        res.status(400).json({ error: 'Expected JSON object body' });
+        return;
+      }
+
+      const payloadBytes = Buffer.byteLength(JSON.stringify(body), 'utf8');
+      if (payloadBytes > ZBGW_MAX_PAYLOAD_BYTES) {
+        res.status(413).json({ error: `Payload exceeds ${ZBGW_MAX_PAYLOAD_BYTES} bytes` });
+        return;
+      }
+
+      const deviceId = body.device_id ?? body.mac ?? body.deviceId;
+      if (typeof deviceId !== 'string' || !deviceId.trim()) {
+        res.status(400).json({ error: 'Missing device_id' });
+        return;
+      }
+
+      const kind = typeof body.kind === 'string' && body.kind ? body.kind : 'unknown';
+      const clientIp = getClientIp(req);
+      const result = zigbee.recordEvent(deviceId, kind, body as Record<string, unknown>, clientIp);
+
+      // Firmware (diag.c) expects { "commands": [ { "action": "restart" }, ... ] }
+      res.json({ commands: result.commands });
+    } catch (err) {
+      console.error('[ZigbeeDiag] Device POST error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/diag/zbgw/gateways', telemetryAuthMiddleware, (_req, res) => {
+    try {
+      if (!zigbee) {
+        res.status(503).json({ error: 'Zigbee diagnostics service not initialized' });
+        return;
+      }
+      res.json({
+        gateways: zigbee.listGateways(),
+        serverTime: Date.now(),
+      });
+    } catch (err) {
+      console.error('[ZigbeeDiag] List gateways error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/diag/zbgw/events', telemetryAuthMiddleware, (req, res) => {
+    try {
+      if (!zigbee) {
+        res.status(503).json({ error: 'Zigbee diagnostics service not initialized' });
+        return;
+      }
+
+      const afterId = parseInt(req.query.afterId as string) || 0;
+      const limit = Math.min(
+        parseInt(req.query.limit as string) || 1000,
+        config.telemetryFeedMaxLimit
+      );
+
+      const feed = zigbee.getEventsFeed(afterId, limit);
+      res.json({
+        rows: feed.rows,
+        maxId: feed.maxId,
+        hasMore: feed.hasMore,
+        serverTime: Date.now(),
+      });
+    } catch (err) {
+      console.error('[ZigbeeDiag] Events feed error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.post('/diag/zbgw/ack', telemetryAuthMiddleware, async (req, res) => {
+    try {
+      if (!zigbee) {
+        res.status(503).json({ error: 'Zigbee diagnostics service not initialized' });
+        return;
+      }
+
+      const { upToId, signature, message, dryRun } = req.body || {};
+
+      if (!upToId || typeof upToId !== 'number') {
+        res.status(400).json({ error: 'Missing or invalid upToId' });
+        return;
+      }
+
+      const adminAddresses = getAdminAddresses();
+      if (adminAddresses.length === 0) {
+        res.status(503).json({ error: 'Admin addresses not configured' });
+        return;
+      }
+
+      if (!signature || !message) {
+        res.status(400).json({ error: 'Missing signature or message' });
+        return;
+      }
+
+      const nonceMatch = message.match(/:([a-f0-9]{64})$/);
+      if (!nonceMatch) {
+        res.status(400).json({ error: 'Message does not contain valid nonce' });
+        return;
+      }
+      const nonce = nonceMatch[1];
+
+      // Message format: 'zbgw-ack:<upToId>:<nonce>'
+      const expectedMessagePrefix = `zbgw-ack:${upToId}:`;
+      if (!message.startsWith(expectedMessagePrefix)) {
+        res.status(400).json({ error: 'Message format mismatch' });
+        return;
+      }
+
+      const result = adminAuth.verifyAndBurnNonce(nonce, message, signature, adminAddresses);
+      if (!result.valid) {
+        res.status(403).json({ error: result.error || 'Signature verification failed' });
+        return;
+      }
+
+      const forceDryRun = !config.telemetryAckEnabled;
+      const effectiveDryRun = dryRun || forceDryRun;
+
+      if (effectiveDryRun) {
+        res.json({
+          wouldDelete: zigbee.countEventsUpTo(upToId),
+          dryRun: true,
+          reason: forceDryRun ? 'TELEMETRY_ACK_ENABLED=false' : 'dryRun requested',
+        });
+        return;
+      }
+
+      const { deleted, remaining } = zigbee.deleteEventsUpTo(upToId);
+      res.json({
+        deleted,
+        remaining,
+        deletedBy: result.address,
+      });
+    } catch (err) {
+      console.error('[ZigbeeDiag] Ack error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.post('/diag/zbgw/commands', telemetryAuthMiddleware, async (req, res) => {
+    try {
+      if (!zigbee) {
+        res.status(503).json({ error: 'Zigbee diagnostics service not initialized' });
+        return;
+      }
+
+      const { mac, action, signature, message } = req.body || {};
+
+      if (!mac || typeof mac !== 'string') {
+        res.status(400).json({ error: 'Missing mac' });
+        return;
+      }
+      if (!action || typeof action !== 'string') {
+        res.status(400).json({ error: 'Missing action' });
+        return;
+      }
+      if (!isAllowedAction(action)) {
+        res.status(400).json({ error: `Unsupported action (allowed: restart, ota_check)` });
+        return;
+      }
+
+      const adminAddresses = getAdminAddresses();
+      if (adminAddresses.length === 0) {
+        res.status(503).json({ error: 'Admin addresses not configured' });
+        return;
+      }
+
+      if (!signature || !message) {
+        res.status(400).json({ error: 'Missing signature or message' });
+        return;
+      }
+
+      const nonceMatch = message.match(/:([a-f0-9]{64})$/);
+      if (!nonceMatch) {
+        res.status(400).json({ error: 'Message does not contain valid nonce' });
+        return;
+      }
+      const nonce = nonceMatch[1];
+
+      // Message format: 'zbgw-cmd:<mac>:<action>:<nonce>'
+      const expectedMessage = `zbgw-cmd:${mac}:${action}:${nonce}`;
+      if (message !== expectedMessage) {
+        res.status(400).json({ error: 'Message format mismatch' });
+        return;
+      }
+
+      const authResult = adminAuth.verifyAndBurnNonce(nonce, message, signature, adminAddresses);
+      if (!authResult.valid) {
+        res.status(403).json({ error: authResult.error || 'Signature verification failed' });
+        return;
+      }
+
+      const command = zigbee.queueCommand(mac, action, authResult.address);
+      res.json({
+        success: true,
+        command,
+        queuedBy: authResult.address,
+      });
+    } catch (err) {
+      console.error('[ZigbeeDiag] Queue command error:', err);
       res.status(500).json({ error: 'Internal error' });
     }
   });
