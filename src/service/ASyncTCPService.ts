@@ -684,13 +684,12 @@ export class ASyncTCPService implements TCPCallback {
     // Setup firmware stays in captive portal (NVS stay_portal) and typically does
     // NOT TCP-login. Observable completion is the *app* reappearing after the
     // device disconnected post-delivery/ack (OTA → portal → Done → app OTA).
-    if (
-      parsed &&
-      parsed.project.toLowerCase() === active.project.toLowerCase() &&
-      (active.status === 'acknowledged' ||
-        (active.disconnectedAfterDelivery &&
-          (active.status === 'delivered' || active.status === 'acknowledged')))
-    ) {
+    const appReappeared =
+      !!parsed && parsed.project.toLowerCase() === active.project.toLowerCase();
+    const revokeSettled =
+      active.status === 'acknowledged' ||
+      (active.status === 'delivered' && active.disconnectedAfterDelivery);
+    if (appReappeared && revokeSettled) {
       firmware.markRevokeCompleted(active.id);
       this.telemetry.recordFirmwareRevoke(
         device,
