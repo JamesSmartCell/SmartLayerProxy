@@ -22,11 +22,29 @@ describe('Firmware API', () => {
     process.env.TELEMETRY_DB_PATH = TEST_TELEMETRY_DB;
     
     vi.mock('../service/CloudflareR2', () => ({
-      uploadToR2: vi.fn(async (key: string, body: Buffer) => {
+      uploadToR2: vi.fn(async (key: string) => {
+        return `https://example.r2.dev/${key}`;
+      }),
+      uploadFirmwareToR2: vi.fn(async (project: string, key: string) => {
+        if (project === 'zigbee-gateway') {
+          return `https://pub-862b54f8a0134f8d8276f74732be8015.r2.dev/${key}`;
+        }
         return `https://example.r2.dev/${key}`;
       }),
       isR2Configured: vi.fn(() => true),
-      getFirmwareBucketName: vi.fn(() => 'test-bucket'),
+      getFirmwareBucketName: vi.fn((project?: string) =>
+        project === 'zigbee-gateway' ? 'esp-firmware' : 'test-bucket'
+      ),
+      getFirmwareStorageConfig: vi.fn((project?: string) => ({
+        project,
+        bucket: project === 'zigbee-gateway' ? 'esp-firmware' : 'test-bucket',
+        publicUrl:
+          project === 'zigbee-gateway'
+            ? 'https://pub-862b54f8a0134f8d8276f74732be8015.r2.dev'
+            : 'https://example.r2.dev',
+        credentials: { accountId: 'a', accessKeyId: 'k', secretAccessKey: 's' },
+        isDedicatedFirmwareBucket: true,
+      })),
     }));
   });
 
@@ -221,6 +239,45 @@ describe('Firmware API', () => {
       expect(response.body.sha256).toBe(sha256);
       expect(response.body.size).toBe(firmware.length);
       expect(response.body.uploadedBy).toBe(wallet.address.toLowerCase());
+      expect(response.body.url).toBe('https://example.r2.dev/firmware/GarageDoor/1.0.0/firmware.bin');
+    });
+
+    it('should store zigbee-gateway firmware against the per-project public bucket URL', async () => {
+      const firmware = Buffer.from('zigbee firmware bytes');
+      const sha256 = createHash('sha256').update(firmware).digest('hex');
+
+      const challengeResp = await request(app).get('/api/admin/challenge').expect(200);
+      const { nonce } = challengeResp.body;
+
+      const message = `firmware:zigbee-gateway:1.0.1:${sha256}:${nonce}`;
+      const signature = await wallet.signMessage(message);
+
+      const response = await request(app)
+        .post(`/api/firmware/zigbee-gateway?version=1.0.1&signature=${encodeURIComponent(signature)}&message=${encodeURIComponent(message)}`)
+        .set('Content-Type', 'application/octet-stream')
+        .send(firmware)
+        .expect(200);
+
+      expect(response.body.success).toBe(true);
+      expect(response.body.project).toBe('zigbee-gateway');
+      expect(response.body.version).toBe('1.0.1');
+      expect(response.body.sha256).toBe(sha256);
+      expect(response.body.size).toBe(firmware.length);
+      expect(response.body.url).toBe(
+        'https://pub-862b54f8a0134f8d8276f74732be8015.r2.dev/firmware/zigbee-gateway/1.0.1/firmware.bin'
+      );
+
+      const latest = await request(app)
+        .get('/api/firmware/zigbee-gateway/latest')
+        .expect(200);
+
+      expect(latest.body).toMatchObject({
+        project: 'zigbee-gateway',
+        version: '1.0.1',
+        sha256,
+        size: firmware.length,
+        url: 'https://pub-862b54f8a0134f8d8276f74732be8015.r2.dev/firmware/zigbee-gateway/1.0.1/firmware.bin',
+      });
     });
 
     it('should reject duplicate version', async () => {
