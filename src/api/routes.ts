@@ -2,7 +2,7 @@ import express, { Router, Request, Response, NextFunction } from 'express';
 import { ASyncService } from '../service/ASyncService';
 import { ASyncTCPService } from '../service/ASyncTCPService';
 import * as passkey from './passkey';
-import { uploadToR2, isR2Configured, getFirmwareBucketName } from '../service/CloudflareR2';
+import { uploadToR2, uploadFirmwareToR2, isR2Configured } from '../service/CloudflareR2';
 import { randomUUID } from 'crypto';
 import { TelemetryService } from '../service/TelemetryService';
 import { FirmwareService } from '../service/FirmwareService';
@@ -652,9 +652,9 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         return;
       }
 
-      // Upload to R2
+      // Upload to R2 (per-project bucket/URL/creds via R2_FIRMWARE_*__PROJECT overrides)
       const r2Key = `firmware/${project}/${version}/firmware.bin`;
-      const url = await uploadToR2(r2Key, body, 'application/octet-stream', getFirmwareBucketName());
+      const url = await uploadFirmwareToR2(project, r2Key, body);
       
       if (!url) {
         res.status(500).json({ error: 'R2 upload failed' });

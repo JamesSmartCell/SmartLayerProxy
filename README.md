@@ -58,7 +58,12 @@ Environment variables (or `application.properties` file):
   - `R2_SECRET_ACCESS_KEY` - R2 secret key (REQUIRED for R2)
   - `R2_BUCKET_NAME` - R2 bucket name (default: `garage-camera`)
   - `R2_PUBLIC_URL` - Public URL for R2 bucket (e.g., `https://pub-xxx.r2.dev`)
-  - `R2_FIRMWARE_BUCKET_NAME` - Optional separate bucket for firmware (defaults to `R2_BUCKET_NAME`)
+  - `R2_FIRMWARE_BUCKET_NAME` - Optional **global** firmware bucket default (defaults to `R2_BUCKET_NAME`; not project-specific)
+  - `R2_FIRMWARE_PUBLIC_URL` - Optional **global** firmware public URL
+  - Per-project overrides (project `zigbee-gateway` → env suffix `ZIGBEE_GATEWAY`):
+    - `R2_FIRMWARE_BUCKET_NAME__ZIGBEE_GATEWAY=esp-firmware`
+    - `R2_FIRMWARE_PUBLIC_URL__ZIGBEE_GATEWAY=https://pub-862b54f8a0134f8d8276f74732be8015.r2.dev`
+    - Optional bucket-scoped creds: `R2_ACCESS_KEY_ID__ZIGBEE_GATEWAY`, `R2_SECRET_ACCESS_KEY__ZIGBEE_GATEWAY`, `R2_ACCOUNT_ID__ZIGBEE_GATEWAY`
 
 - **Passkey (GarageDoorKey):**
   - `PASSKEY_RP_ID` - Relying party ID (default: percolate.one)
@@ -136,8 +141,9 @@ reserved for a future per-device P-256 signing scheme (admin-approved pubkey); n
 
 **OTA:** Upload project `zigbee-gateway` via the existing firmware coordinator /
 `npm run firmware:upload zigbee-gateway <semver> firmware.bin`. Devices (or tooling) can query
-`GET /api/firmware/zigbee-gateway/latest` → `{version,url,sha256,size}`. No special-casing beyond
-the project name.
+`GET /api/firmware/zigbee-gateway/latest` → `{version,url,sha256,size}`. Set per-project R2 overrides
+(`R2_FIRMWARE_BUCKET_NAME__ZIGBEE_GATEWAY` / `R2_FIRMWARE_PUBLIC_URL__ZIGBEE_GATEWAY`) so uploads
+land in the `esp-firmware` bucket; other projects keep the global firmware/camera defaults.
 
 ### Telemetry Feed & Acknowledgement
 

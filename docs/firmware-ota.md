@@ -15,12 +15,30 @@ The OTA update flow consists of three main steps:
 Firmware OTA requires the following environment variables:
 
 - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`: Cloudflare R2 credentials
-- `R2_FIRMWARE_BUCKET_NAME`: Bucket name for firmware storage (optional, defaults to `R2_BUCKET_NAME`)
-- `R2_FIRMWARE_PUBLIC_URL`: Public URL for the firmware bucket (e.g., `https://pub-xxxx.r2.dev`)
+- `R2_FIRMWARE_BUCKET_NAME`: **Global** firmware bucket default (optional, defaults to `R2_BUCKET_NAME`)
+- `R2_FIRMWARE_PUBLIC_URL`: **Global** firmware public URL (optional)
   - If not set, falls back to `R2_PUBLIC_URL`
   - If neither is set, uses the private `r2.cloudflarestorage.com` endpoint (devices won't be able to download)
 
-When using a separate firmware bucket (`R2_FIRMWARE_BUCKET_NAME`), you must configure `R2_FIRMWARE_PUBLIC_URL` or `R2_PUBLIC_URL` to allow devices to download firmware. The proxy will log a warning at first firmware upload if no public URL is configured.
+### Per-project firmware buckets
+
+Projects can override the global firmware bucket/URL (and optionally credentials) without changing
+GarageDoor/Web3E defaults. Project name `zigbee-gateway` maps to env suffix `ZIGBEE_GATEWAY`
+(uppercase; non-alphanumeric → `_`):
+
+```bash
+R2_FIRMWARE_BUCKET_NAME__ZIGBEE_GATEWAY=esp-firmware
+R2_FIRMWARE_PUBLIC_URL__ZIGBEE_GATEWAY=https://pub-862b54f8a0134f8d8276f74732be8015.r2.dev
+# Optional if the R2 API token is bucket-scoped:
+# R2_ACCESS_KEY_ID__ZIGBEE_GATEWAY=...
+# R2_SECRET_ACCESS_KEY__ZIGBEE_GATEWAY=...
+# R2_ACCOUNT_ID__ZIGBEE_GATEWAY=...
+```
+
+Resolution order for each project: per-project override → global `R2_FIRMWARE_*` → `R2_BUCKET_NAME` / `R2_PUBLIC_URL`.
+Do not repurpose the global `R2_FIRMWARE_BUCKET_NAME` / `R2_FIRMWARE_PUBLIC_URL` for a single project.
+
+When a dedicated firmware bucket is used without a public URL, the proxy logs a warning at upload time.
 
 ## Firmware Version Format
 
