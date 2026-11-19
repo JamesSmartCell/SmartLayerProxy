@@ -5,7 +5,11 @@ import * as passkey from './passkey';
 import { uploadToR2, uploadFirmwareToR2, isR2Configured } from '../service/CloudflareR2';
 import { randomUUID } from 'crypto';
 import { TelemetryService } from '../service/TelemetryService';
-import { FirmwareService } from '../service/FirmwareService';
+import {
+  FirmwareService,
+  buildRevokeNoticeMessage,
+  normalizeDeviceAddress,
+} from '../service/FirmwareService';
 import { AdminAuthService } from '../service/AdminAuthService';
 import {
   ZigbeeDiagnosticsService,
@@ -352,6 +356,29 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
     }
   });
 
+  // Current setup (provisioning portal) firmware for a project — distinct from app /latest
+  router.get('/firmware/:project/setup', (req, res) => {
+    try {
+      if (!firmware) {
+        res.status(503).json({ error: 'Firmware service not initialized' });
+        return;
+      }
+
+      const project = req.params.project;
+      const setup = firmware.getSetupFirmware(project);
+
+      if (!setup) {
+        res.status(404).json({ error: 'No setup firmware found for this project' });
+        return;
+      }
+
+      res.json(setup);
+    } catch (err) {
+      console.error('[Firmware] Setup query error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
   router.get('/firmware/:project', (req, res) => {
     try {
       if (!firmware) {
@@ -361,8 +388,9 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
 
       const project = req.params.project;
       const versions = firmware.listVersions(project);
+      const setupVersions = firmware.listSetupVersions(project);
 
-      res.json({ project, versions });
+      res.json({ project, versions, setupVersions });
     } catch (err) {
       console.error('[Firmware] List versions error:', err);
       res.status(500).json({ error: 'Internal error' });
@@ -573,6 +601,319 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
       });
     } catch (err) {
       console.error('[Firmware] Notify error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  // Upload setup (provisioning) firmware — same admin signing scheme as app firmware,
+  // message format: setup-firmware:<project>:<version>:<sha256>:<nonce>
+  router.post(
+    '/firmware/:project/setup',
+    express.raw({
+      type: ['application/octet-stream', 'application/x-binary'],
+      limit: `${config.firmwareUploadMaxSizeMb}mb`,
+    }),
+    async (req, res) => {
+      try {
+        if (!firmware) {
+          res.status(503).json({ error: 'Firmware service not initialized' });
+          return;
+        }
+
+        if (!isR2Configured(req.params.project)) {
+          res.status(503).json({ error: 'R2 storage not configured' });
+          return;
+        }
+
+        const project = req.params.project;
+        const version = req.query.version as string;
+        const signature = req.query.signature as string;
+        const message = req.query.message as string;
+
+        if (!version) {
+          res.status(400).json({ error: 'Missing version query parameter' });
+          return;
+        }
+
+        if (!FirmwareVersionParser.isPlainSemver(version)) {
+          res.status(400).json({
+            error:
+              'Version must be plain semver MAJOR.MINOR.PATCH (e.g., 1.2.3). Do not include project name, v prefix, or build suffix.',
+          });
+          return;
+        }
+
+        const adminAddresses = getAdminAddresses();
+        if (adminAddresses.length === 0) {
+          res.status(503).json({ error: 'Admin addresses not configured' });
+          return;
+        }
+
+        if (!signature || !message) {
+          res.status(400).json({ error: 'Missing signature or message query parameters' });
+          return;
+        }
+
+        const body = req.body as Buffer | undefined;
+        if (!body || body.length === 0) {
+          res.status(400).json({ error: 'No firmware data' });
+          return;
+        }
+
+        const sha256 = FirmwareService.computeSha256(body);
+
+        const nonceMatch = message.match(/:([a-f0-9]{64})$/);
+        if (!nonceMatch) {
+          res.status(400).json({ error: 'Message does not contain valid nonce' });
+          return;
+        }
+        const nonce = nonceMatch[1];
+
+        const expectedMessage = `setup-firmware:${project}:${version}:${sha256}:${nonce}`;
+        if (message !== expectedMessage) {
+          res.status(400).json({
+            error:
+              'Message format mismatch (expected setup-firmware:<project>:<version>:<sha256>:<nonce>)',
+          });
+          return;
+        }
+
+        const authResult = adminAuth.verifyAndBurnNonce(nonce, message, signature, adminAddresses);
+        if (!authResult.valid) {
+          res.status(403).json({ error: authResult.error || 'Signature verification failed' });
+          return;
+        }
+
+        if (firmware.setupFirmwareExists(project, version)) {
+          res.status(409).json({ error: 'Setup version already exists' });
+          return;
+        }
+
+        const r2Key = `firmware/${project}/setup/${version}/firmware.bin`;
+        const url = await uploadFirmwareToR2(project, r2Key, body);
+        if (!url) {
+          res.status(500).json({ error: 'R2 upload failed' });
+          return;
+        }
+
+        const metadata = firmware.addSetupFirmware(
+          project,
+          version,
+          sha256,
+          body.length,
+          r2Key,
+          url,
+          authResult.address,
+          true
+        );
+
+        res.json({
+          success: true,
+          channel: 'setup',
+          project: metadata.project,
+          version: metadata.version,
+          sha256: metadata.sha256,
+          size: metadata.size,
+          url: metadata.url,
+          uploadedBy: metadata.uploadedBy,
+        });
+      } catch (err) {
+        console.error('[Firmware] Setup upload error:', err);
+        res.status(500).json({ error: 'Internal error' });
+      }
+    }
+  );
+
+  // Revoke a device: push admin-signed updateReady(purpose=revoke) notice, or queue if offline
+  router.post('/firmware/:project/revoke', express.json(), async (req, res) => {
+    try {
+      if (!firmware) {
+        res.status(503).json({ error: 'Firmware service not initialized' });
+        return;
+      }
+
+      const project = req.params.project;
+      const { device, signature, message } = req.body || {};
+
+      if (!device || typeof device !== 'string') {
+        res.status(400).json({ error: 'Missing device address' });
+        return;
+      }
+
+      const adminAddresses = getAdminAddresses();
+      if (adminAddresses.length === 0) {
+        res.status(503).json({ error: 'Admin addresses not configured' });
+        return;
+      }
+
+      if (!signature || !message) {
+        res.status(400).json({ error: 'Missing signature or message' });
+        return;
+      }
+
+      const setup = firmware.getSetupFirmware(project);
+      if (!setup) {
+        res.status(404).json({ error: 'No setup firmware registered for this project' });
+        return;
+      }
+
+      const nonceMatch = message.match(/:([a-f0-9]{64})$/);
+      if (!nonceMatch) {
+        res.status(400).json({ error: 'Message does not contain valid nonce' });
+        return;
+      }
+      const nonce = nonceMatch[1];
+
+      const expectedMessage = buildRevokeNoticeMessage(project, device, setup.sha256, nonce);
+      if (message !== expectedMessage) {
+        res.status(400).json({
+          error:
+            'Message format mismatch (expected revoke:<project>:<device>:<setupSha256>:<nonce>)',
+        });
+        return;
+      }
+
+      const authResult = adminAuth.verifyAndBurnNonce(nonce, message, signature, adminAddresses);
+      if (!authResult.valid) {
+        res.status(403).json({ error: authResult.error || 'Signature verification failed' });
+        return;
+      }
+
+      const revoke = firmware.requestRevoke({
+        project,
+        device,
+        setup,
+        noticeMessage: message,
+        noticeSignature: signature,
+        requestedBy: authResult.address,
+      });
+
+      telemetry.recordFirmwareRevoke(
+        revoke.device,
+        project,
+        'requested',
+        setup.version
+      );
+
+      const delivered = tcpService.deliverPendingRevoke(normalizeDeviceAddress(device));
+
+      res.json({
+        success: true,
+        project,
+        device: revoke.device,
+        status: delivered ? 'delivered' : 'pending',
+        setup: {
+          version: setup.version,
+          sha256: setup.sha256,
+          size: setup.size,
+          url: setup.url,
+        },
+        revokeId: revoke.id,
+        revokedBy: authResult.address,
+        queued: !delivered,
+      });
+    } catch (err) {
+      console.error('[Firmware] Revoke error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  // Cancel a pending or delivered-but-not-completed revoke
+  router.post('/firmware/:project/revoke/cancel', express.json(), async (req, res) => {
+    try {
+      if (!firmware) {
+        res.status(503).json({ error: 'Firmware service not initialized' });
+        return;
+      }
+
+      const project = req.params.project;
+      const { device, signature, message } = req.body || {};
+
+      if (!device || typeof device !== 'string') {
+        res.status(400).json({ error: 'Missing device address' });
+        return;
+      }
+
+      const adminAddresses = getAdminAddresses();
+      if (adminAddresses.length === 0) {
+        res.status(503).json({ error: 'Admin addresses not configured' });
+        return;
+      }
+
+      if (!signature || !message) {
+        res.status(400).json({ error: 'Missing signature or message' });
+        return;
+      }
+
+      const nonceMatch = message.match(/:([a-f0-9]{64})$/);
+      if (!nonceMatch) {
+        res.status(400).json({ error: 'Message does not contain valid nonce' });
+        return;
+      }
+      const nonce = nonceMatch[1];
+
+      const normalizedDevice = normalizeDeviceAddress(device);
+      const expectedMessage = `revoke-cancel:${project}:${normalizedDevice}:${nonce}`;
+      if (message !== expectedMessage) {
+        res.status(400).json({
+          error:
+            'Message format mismatch (expected revoke-cancel:<project>:<device>:<nonce>)',
+        });
+        return;
+      }
+
+      const authResult = adminAuth.verifyAndBurnNonce(nonce, message, signature, adminAddresses);
+      if (!authResult.valid) {
+        res.status(403).json({ error: authResult.error || 'Signature verification failed' });
+        return;
+      }
+
+      const cancelled = firmware.cancelRevoke(normalizedDevice, project);
+      if (!cancelled) {
+        res.status(404).json({ error: 'No active revoke found for this device' });
+        return;
+      }
+
+      telemetry.recordFirmwareRevoke(
+        cancelled.device,
+        project,
+        'cancelled',
+        cancelled.setupVersion
+      );
+
+      res.json({
+        success: true,
+        project,
+        device: cancelled.device,
+        status: 'cancelled',
+        revokeId: cancelled.id,
+        cancelledBy: authResult.address,
+      });
+    } catch (err) {
+      console.error('[Firmware] Revoke cancel error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  router.get('/firmware/:project/revokes', (req, res) => {
+    try {
+      if (!firmware) {
+        res.status(503).json({ error: 'Firmware service not initialized' });
+        return;
+      }
+
+      const project = req.params.project;
+      const device = typeof req.query.device === 'string' ? req.query.device : undefined;
+      const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+      const revokes = firmware.listRevokes(project, {
+        device,
+        status: status as any,
+        limit: 100,
+      });
+
+      res.json({ project, revokes });
+    } catch (err) {
+      console.error('[Firmware] List revokes error:', err);
       res.status(500).json({ error: 'Internal error' });
     }
   });

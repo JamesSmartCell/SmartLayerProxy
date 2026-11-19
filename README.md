@@ -87,8 +87,13 @@ Admin-protected operations require a signed challenge. The flow:
    - For Zigbee ack: `zbgw-ack:<upToId>:<nonce>`
    - For Zigbee command queue: `zbgw-cmd:<mac>:<action>:<nonce>` (`restart` | `ota_check`)
    - For firmware upload: `firmware:<project>:<version>:<sha256>:<nonce>`
+   - For setup firmware upload: `setup-firmware:<project>:<version>:<sha256>:<nonce>`
    - For firmware rollback: `current:<project>:<version>:<nonce>`
+   - For device revoke: `revoke:<project>:<device>:<setupSha256>:<nonce>`
+   - For revoke cancel: `revoke-cancel:<project>:<device>:<nonce>`
 3. Submit signature with request (nonce is single-use and burned after verification)
+
+See [docs/firmware-ota.md](docs/firmware-ota.md) for OTA notify, setup firmware, and **device revocation** (notice format for firmware agents).
 
 ### Zigbee Gateway Diagnostics
 

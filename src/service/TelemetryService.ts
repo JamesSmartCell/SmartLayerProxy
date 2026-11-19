@@ -8,11 +8,22 @@ import { dirname } from 'path';
 
 export type DisconnectReason = 'timeout' | 'socket_error' | 'auth_failure' | 'signature_failure' | 'client_close' | 'terminated' | 'unknown';
 
+export type TelemetryEventType =
+  | 'connect'
+  | 'disconnect'
+  | 'api_call'
+  | 'firmware_notify'
+  | 'firmware_revoke_requested'
+  | 'firmware_revoke_delivered'
+  | 'firmware_revoke_acknowledged'
+  | 'firmware_revoke_completed'
+  | 'firmware_revoke_cancelled';
+
 export interface DeviceEvent {
   id: number;
   timestamp: number;
   device: string;
-  eventType: 'connect' | 'disconnect' | 'api_call' | 'firmware_notify';
+  eventType: TelemetryEventType;
   protocol?: 'UDP' | 'TCP';
   disconnectReason?: DisconnectReason;
   apiMethod?: string;
@@ -287,6 +298,32 @@ export class TelemetryService {
       VALUES (?, ?, 'firmware_notify', ?, ?)
     `);
     stmt.run(now, normalized, project, version);
+  }
+
+  recordFirmwareRevoke(
+    address: string,
+    project: string,
+    phase: 'requested' | 'delivered' | 'acknowledged' | 'completed' | 'cancelled',
+    setupVersion?: string,
+    firmwareVersion?: string
+  ): void {
+    const normalized = address.toLowerCase();
+    const now = Date.now();
+    const eventType = `firmware_revoke_${phase}` as TelemetryEventType;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO device_events (
+        timestamp, device, event_type, firmware_project, firmware_notify_version, firmware_version
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      now,
+      normalized,
+      eventType,
+      project,
+      setupVersion || null,
+      firmwareVersion || null
+    );
   }
 
   getDeviceMetrics(address: string, since?: number): DeviceMetrics | undefined {

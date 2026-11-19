@@ -81,7 +81,7 @@ The uploaded version is stored in the database and compared with device semver d
 
 ### GET /api/firmware/:project/latest
 
-Get the latest firmware metadata for a project.
+Get the latest **app** firmware metadata for a project.
 
 **Response:**
 ```json
@@ -95,6 +95,10 @@ Get the latest firmware metadata for a project.
 ```
 
 This endpoint is called by devices to check for updates and download the firmware.
+
+### GET /api/firmware/:project/setup
+
+Get the current **setup** (provisioning portal) firmware metadata for a project. Same JSON shape as `/latest`, plus `"channel": "setup"`. Distinct from app latest — used after a revoke notice.
 
 ### POST /api/firmware/:project
 
@@ -418,11 +422,147 @@ All firmware notifications are recorded as telemetry events with type `firmware_
 
 These events can be queried through the telemetry API for monitoring and analysis.
 
+## Device Revocation (REVOCATION)
+
+An admin can revoke a specific device by address. The proxy sends an **admin-signed revoke notice** over the existing OTA notify channel (TCP opcode `0x04` / `updateReady`). The device must OTA-install that project's **setup firmware** and reboot into the provisioning portal.
+
+### Setup firmware (distinct from app `latest`)
+
+Setup (provisioning portal) firmware is stored per project alongside app firmware in R2, but **never** becomes `/api/firmware/:project/latest`.
+
+| | App firmware | Setup firmware |
+|---|---|---|
+| GET metadata | `/api/firmware/:project/latest` | `/api/firmware/:project/setup` |
+| Upload | `POST /api/firmware/:project` | `POST /api/firmware/:project/setup` |
+| Signed message | `firmware:<project>:<version>:<sha256>:<nonce>` | `setup-firmware:<project>:<version>:<sha256>:<nonce>` |
+| R2 key | `firmware/<project>/<version>/firmware.bin` | `firmware/<project>/setup/<version>/firmware.bin` |
+| CLI | `npm run firmware:upload ...` | `npm run firmware:upload-setup ...` |
+
+**Post-revoke boot (setup firmware contract):** app sets NVS `web3e_boot` / `stay_portal=1` before OTA to setup. Setup stays in the captive portal until the user taps **Done**, then clears the flag and re-pulls app firmware. Setup typically does **not** TCP-login to the proxy while in the portal — do not rely on a setup-firmware login for telemetry.
+
+### Exact revoke notice format (for firmware agents)
+
+Transport is the **same** as OTA notify: TCP opcode `0x04`, method name `updateReady`, length-prefixed key/value args (Web3E `APIReturn` params).
+
+**Normal OTA notify (unchanged):**
+
+| Field | Value |
+|---|---|
+| method | `updateReady` |
+| args | _(none)_ |
+| device response | `checking` or `rate_limited` |
+
+**Revoke notice (extension):**
+
+| Field | Value |
+|---|---|
+| method | `updateReady` |
+| `purpose` | `revoke` |
+| `version` | setup firmware plain semver (e.g. `1.0.0`) |
+| `sha256` | setup firmware SHA-256 hex (lowercase, 64 chars) |
+| `size` | setup firmware size in bytes (decimal string) |
+| `message` | `revoke:<project>:<device>:<sha256>:<nonce>` |
+| `signature` | EIP-191 `personal_sign` of `message` by an `ADMIN_ADDRESSES` key |
+| device response | `revoking` (required ack before OTA) |
+
+Notes:
+
+- `<device>` is the lowercase `0x`-prefixed device address (the device's KeyID address).
+- `<sha256>` in `message` is the **setup** firmware hash (binds the notice to a specific binary).
+- `<nonce>` is a 64-char hex challenge from `GET /api/admin/challenge` (same admin auth flow as upload/notify).
+- URL is **not** sent on the wire (255-byte arg limit). After verifying the signature, the device MUST `GET /api/firmware/<project>/setup`, confirm `sha256`/`size`/`version` match the notice, then download `url`, verify SHA-256, flash, and reboot.
+- Devices MUST treat `purpose=revoke` as an instruction to install setup firmware **even if** that means replacing newer app firmware (revoke is not a semver upgrade).
+- Devices SHOULD verify `signature` recovers an address in their local admin list before flashing.
+- **App firmware sequence:** respond `revoking` → set NVS `web3e_boot`/`stay_portal=1` → OTA setup → reboot. (Aligned with [Web3E-Setup-Firmware#3](https://github.com/JamesSmartCell/Web3E-Setup-Firmware/pull/3).)
+
+### Admin HTTP API
+
+**POST `/api/firmware/:project/revoke`**
+
+```json
+{
+  "device": "0xaaa...",
+  "message": "revoke:<project>:<device>:<setupSha256>:<nonce>",
+  "signature": "0x..."
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "project": "garagedoor",
+  "device": "0xaaa...",
+  "status": "delivered",
+  "queued": false,
+  "setup": { "version": "1.0.0", "sha256": "...", "size": 12345, "url": "https://..." },
+  "revokeId": 1,
+  "revokedBy": "0xadmin..."
+}
+```
+
+- If the device is **online**, the notice is sent immediately (`status: delivered`).
+- If the device is **offline**, the signed notice is queued (`status: pending`, `queued: true`) and delivered automatically on the device's next TCP login.
+- A new revoke for the same device cancels any previous pending/delivered revoke.
+
+**POST `/api/firmware/:project/revoke/cancel`**
+
+```json
+{
+  "device": "0xaaa...",
+  "message": "revoke-cancel:<project>:<device>:<nonce>",
+  "signature": "0x..."
+}
+```
+
+Cancels a pending or delivered-but-not-completed revoke so it will not be (re)delivered.
+
+**GET `/api/firmware/:project/revokes`** — list revoke records (`?device=`, `?status=`).
+
+### CLI
+
+```bash
+# Upload setup firmware (does not change app latest)
+npm run firmware:upload-setup garagedoor 1.0.0 setup-firmware.bin
+
+# Revoke a device (queues if offline)
+npm run firmware:revoke garagedoor 0xaaa...
+
+# Cancel a pending revoke
+npm run firmware:revoke:cancel garagedoor 0xaaa...
+```
+
+Requires the same `.env` as upload: `PROXY_BASE_URL`, `FIRMWARE_ADMIN_KEY`.
+
+### Queueing behaviour
+
+1. Admin calls revoke → proxy verifies signature, records `firmware_revoke_requested`, stores notice.
+2. If connected → send `updateReady` args, mark `delivered`, record `firmware_revoke_delivered`.
+3. If offline → leave `pending`; on next TCP auth (opcode `0x09`/`0x07`), deliver and mark `delivered`.
+4. When the device responds to the API call with a body starting with `revoking`, mark `acknowledged` and record `firmware_revoke_acknowledged` (observable outcome **before** OTA).
+5. Disconnect after delivery/ack is noted (expected when the device reboots into setup/portal).
+6. When the **app** firmware later TCP-logs in again for the same project (after ack, or after a post-delivery disconnect), mark `completed` and record `firmware_revoke_completed`. Setup firmware usually does **not** appear on the TCP channel while `stay_portal=1`.
+7. Cancel moves active revokes to `cancelled` (`firmware_revoke_cancelled`) and stops delivery.
+
+### Revoke telemetry events
+
+| `eventType` | When |
+|---|---|
+| `firmware_revoke_requested` | Admin revoke accepted |
+| `firmware_revoke_delivered` | Notice written to device TCP channel |
+| `firmware_revoke_acknowledged` | Device replied `revoking` (pre-OTA ack) |
+| `firmware_revoke_completed` | App firmware re-appeared after revoke (post-portal re-provision) |
+| `firmware_revoke_cancelled` | Admin cancelled pending/delivered/acknowledged revoke |
+
+`firmware_project` = app project; `firmware_notify_version` = setup version; `firmware_version` on completed = reported app login string.
+
 ## Security
 
-- All upload and notify operations require admin authentication (Ethereum signature)
+- All upload, notify, setup-upload, and revoke operations require admin authentication (Ethereum signature)
 - Firmware binaries are uploaded to Cloudflare R2 with unique keys
 - Devices verify SHA256 checksums before flashing
+- Revoke notices are admin-signed and bound to a specific setup SHA-256
 - Legacy firmware is never automatically notified (prevents breaking old devices)
 
 ## Troubleshooting
