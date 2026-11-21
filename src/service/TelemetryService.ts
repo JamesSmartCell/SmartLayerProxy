@@ -17,7 +17,18 @@ export type TelemetryEventType =
   | 'firmware_revoke_delivered'
   | 'firmware_revoke_acknowledged'
   | 'firmware_revoke_completed'
-  | 'firmware_revoke_cancelled';
+  | 'firmware_revoke_cancelled'
+  | 'get_challenge_failed';
+
+export type GetChallengeFailReason =
+  | 'device_offline'
+  | 'timeout'
+  | 'empty_response'
+  | 'bad_response'
+  | 'exception'
+  | 'auth_error'
+  | 'validation_error'
+  | 'unknown';
 
 export interface DeviceEvent {
   id: number;
@@ -33,6 +44,9 @@ export interface DeviceEvent {
   firmwareVersion?: string;
   firmwareProject?: string;
   firmwareNotifyVersion?: string;
+  failureReason?: string;
+  requests60s?: number;
+  requests10m?: number;
 }
 
 export interface DeviceMetrics {
@@ -66,6 +80,7 @@ export interface DeviceDiagnostics {
   networkIndex?: number;
   lastFailureStage?: string;
   wifiDisconnectReason?: string;
+  ipAddress?: string;
 }
 
 export interface SilentDevice {
@@ -201,6 +216,9 @@ export class TelemetryService {
       { name: 'firmware_version', type: 'TEXT', added: 'PR #2' },
       { name: 'firmware_project', type: 'TEXT', added: 'firmware-notify' },
       { name: 'firmware_notify_version', type: 'TEXT', added: 'firmware-notify' },
+      { name: 'failure_reason', type: 'TEXT', added: 'get-challenge-failed' },
+      { name: 'requests_60s', type: 'INTEGER', added: 'get-challenge-failed' },
+      { name: 'requests_10m', type: 'INTEGER', added: 'get-challenge-failed' },
     ];
 
     // Add any missing columns
@@ -209,6 +227,14 @@ export class TelemetryService {
         console.log(`[Telemetry] Migrating schema: adding ${col.name} column (${col.added})`);
         this.db.exec(`ALTER TABLE device_events ADD COLUMN ${col.name} ${col.type}`);
       }
+    }
+
+    // device_diagnostics.ip_address
+    const diagColumns = this.db.prepare('PRAGMA table_info(device_diagnostics)').all() as Array<{ name: string }>;
+    const diagNames = new Set(diagColumns.map((c) => c.name));
+    if (!diagNames.has('ip_address')) {
+      console.log('[Telemetry] Migrating schema: adding device_diagnostics.ip_address');
+      this.db.exec('ALTER TABLE device_diagnostics ADD COLUMN ip_address TEXT');
     }
   }
 
@@ -256,48 +282,89 @@ export class TelemetryService {
     }
   }
 
-  recordDeviceDisconnect(address: string, reason: DisconnectReason): void {
+  recordDeviceDisconnect(address: string, reason: DisconnectReason, ipAddress?: string): void {
     const normalized = address.toLowerCase();
     const now = Date.now();
 
+    const session = this.activeSessions.get(normalized);
+    const ip = ipAddress || session?.ipAddress;
     this.activeSessions.delete(normalized);
 
     const stmt = this.db.prepare(`
-      INSERT INTO device_events (timestamp, device, event_type, disconnect_reason)
-      VALUES (?, ?, 'disconnect', ?)
+      INSERT INTO device_events (timestamp, device, event_type, disconnect_reason, ip_address)
+      VALUES (?, ?, 'disconnect', ?, ?)
     `);
-    stmt.run(now, normalized, reason);
+    stmt.run(now, normalized, reason, ip || null);
   }
 
   recordApiCall(
     address: string,
     method: string,
     success: boolean,
-    responseTimeMs: number
+    responseTimeMs: number,
+    ipAddress?: string
   ): void {
     const normalized = address.toLowerCase();
     const now = Date.now();
+    const sessionIp = this.activeSessions.get(normalized)?.ipAddress;
+    const ip = ipAddress || sessionIp;
 
     const stmt = this.db.prepare(`
-      INSERT INTO device_events (timestamp, device, event_type, api_method, api_success, api_response_time)
-      VALUES (?, ?, 'api_call', ?, ?, ?)
+      INSERT INTO device_events (timestamp, device, event_type, api_method, api_success, api_response_time, ip_address)
+      VALUES (?, ?, 'api_call', ?, ?, ?, ?)
     `);
-    stmt.run(now, normalized, method, success ? 1 : 0, responseTimeMs);
+    stmt.run(now, normalized, method, success ? 1 : 0, responseTimeMs, ip || null);
   }
 
   recordFirmwareNotify(
     address: string,
     project: string,
-    version: string
+    version: string,
+    ipAddress?: string
   ): void {
     const normalized = address.toLowerCase();
     const now = Date.now();
+    const sessionIp = this.activeSessions.get(normalized)?.ipAddress;
+    const ip = ipAddress || sessionIp;
 
     const stmt = this.db.prepare(`
-      INSERT INTO device_events (timestamp, device, event_type, firmware_project, firmware_notify_version)
-      VALUES (?, ?, 'firmware_notify', ?, ?)
+      INSERT INTO device_events (timestamp, device, event_type, firmware_project, firmware_notify_version, ip_address)
+      VALUES (?, ?, 'firmware_notify', ?, ?, ?)
     `);
-    stmt.run(now, normalized, project, version);
+    stmt.run(now, normalized, project, version, ip || null);
+  }
+
+  /**
+   * Record an unsuccessful HTTP getChallenge (or equivalent) for DDoS / flood tracing.
+   */
+  recordGetChallengeFailed(options: {
+    address: string;
+    ipAddress?: string;
+    reason: GetChallengeFailReason | string;
+    durationMs: number;
+    project?: string;
+    requests60s?: number;
+    requests10m?: number;
+  }): void {
+    const normalized = (options.address || 'unknown').toLowerCase();
+    const now = Date.now();
+
+    const stmt = this.db.prepare(`
+      INSERT INTO device_events (
+        timestamp, device, event_type, api_method, api_success, api_response_time,
+        ip_address, failure_reason, firmware_project, requests_60s, requests_10m
+      ) VALUES (?, ?, 'get_challenge_failed', 'getChallenge', 0, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      now,
+      normalized,
+      options.durationMs,
+      options.ipAddress || null,
+      options.reason,
+      options.project || null,
+      options.requests60s ?? null,
+      options.requests10m ?? null
+    );
   }
 
   recordFirmwareRevoke(
@@ -305,16 +372,19 @@ export class TelemetryService {
     project: string,
     phase: 'requested' | 'delivered' | 'acknowledged' | 'completed' | 'cancelled',
     setupVersion?: string,
-    firmwareVersion?: string
+    firmwareVersion?: string,
+    ipAddress?: string
   ): void {
     const normalized = address.toLowerCase();
     const now = Date.now();
     const eventType = `firmware_revoke_${phase}` as TelemetryEventType;
+    const sessionIp = this.activeSessions.get(normalized)?.ipAddress;
+    const ip = ipAddress || sessionIp;
 
     const stmt = this.db.prepare(`
       INSERT INTO device_events (
-        timestamp, device, event_type, firmware_project, firmware_notify_version, firmware_version
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        timestamp, device, event_type, firmware_project, firmware_notify_version, firmware_version, ip_address
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       now,
@@ -322,7 +392,8 @@ export class TelemetryService {
       eventType,
       project,
       setupVersion || null,
-      firmwareVersion || null
+      firmwareVersion || null,
+      ip || null
     );
   }
 
@@ -526,7 +597,13 @@ export class TelemetryService {
         api_method as apiMethod,
         api_success as apiSuccess,
         api_response_time as apiResponseTime,
-        ip_address as ipAddress
+        ip_address as ipAddress,
+        firmware_version as firmwareVersion,
+        firmware_project as firmwareProject,
+        firmware_notify_version as firmwareNotifyVersion,
+        failure_reason as failureReason,
+        requests_60s as requests60s,
+        requests_10m as requests10m
       FROM device_events
       ${whereClause}
       ORDER BY timestamp DESC
@@ -554,16 +631,19 @@ export class TelemetryService {
       networkIndex?: number;
       lastFailureStage?: string;
       wifiDisconnectReason?: string;
-    }
+    },
+    ipAddress?: string
   ): void {
     const normalized = address.toLowerCase();
     const now = Date.now();
+    const sessionIp = this.activeSessions.get(normalized)?.ipAddress;
+    const ip = ipAddress || sessionIp;
 
     const stmt = this.db.prepare(`
       INSERT INTO device_diagnostics (
         timestamp, device, reset_reason, boot_count, wifi_attempts,
-        connect_time_ms, network_index, last_failure_stage, wifi_disconnect_reason
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        connect_time_ms, network_index, last_failure_stage, wifi_disconnect_reason, ip_address
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
     stmt.run(
@@ -575,7 +655,8 @@ export class TelemetryService {
       diagnostics.connectTimeMs ?? null,
       diagnostics.networkIndex ?? null,
       diagnostics.lastFailureStage ?? null,
-      diagnostics.wifiDisconnectReason ?? null
+      diagnostics.wifiDisconnectReason ?? null,
+      ip || null
     );
   }
 
@@ -590,7 +671,8 @@ export class TelemetryService {
         connect_time_ms as connectTimeMs,
         network_index as networkIndex,
         last_failure_stage as lastFailureStage,
-        wifi_disconnect_reason as wifiDisconnectReason
+        wifi_disconnect_reason as wifiDisconnectReason,
+        ip_address as ipAddress
       FROM device_diagnostics
       WHERE device = ?
       ORDER BY timestamp DESC

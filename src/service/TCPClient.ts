@@ -1,12 +1,12 @@
 import * as net from 'net';
 import { MultiValueMap } from '../types';
+import { normalizeIp } from '../util/ip';
 
 export const CONNECTION_CLEANUP_TIME = 8 * 60 * 1000;
 export const MAX_TCP_PACKET = 4096;
 
 export function normalizeRemoteIp(ip: string | undefined | null): string {
-  if (!ip) return '';
-  return ip.replace(/^::ffff:/i, '').toLowerCase();
+  return normalizeIp(ip);
 }
 
 export interface TCPCallback {
@@ -36,11 +36,20 @@ export class TCPClient {
     this.remoteIp = normalizeRemoteIp(socket.remoteAddress);
   }
 
-  start(): void {
+  /** Override peer IP after PROXY protocol parsing (or for tests). */
+  setRemoteIp(ip: string): void {
+    this.remoteIp = normalizeRemoteIp(ip);
+  }
+
+  /**
+   * Begin reading application data. Optional `initialData` is processed first
+   * (leftover bytes after a stripped PROXY header).
+   */
+  start(initialData?: Buffer): void {
     this.running = true;
     let buffer = Buffer.alloc(0);
 
-    this.socket.on('data', (data: Buffer) => {
+    const handleChunk = (data: Buffer): void => {
       try {
         if (!data.length) return;
         if (buffer.length + data.length > MAX_TCP_PACKET) {
@@ -80,7 +89,9 @@ export class TCPClient {
         console.error('TCP data handler #' + this.clientIndex, err instanceof Error ? err.message : err);
         buffer = Buffer.alloc(0);
       }
-    });
+    };
+
+    this.socket.on('data', (data: Buffer) => handleChunk(data));
 
     this.socket.on('close', () => {
       this.running = false;
@@ -91,6 +102,10 @@ export class TCPClient {
       this.running = false;
       this.serverCallback.disconnect(this.clientIndex, 'socket_error');
     });
+
+    if (initialData && initialData.length) {
+      handleChunk(initialData);
+    }
   }
 
   getLastConnection(): number {

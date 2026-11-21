@@ -1,65 +1,58 @@
-# TCP Connection IP Address Handling
+# TCP / HTTP client IP address handling
 
-## Current State
+## HTTP API: X-Forwarded-For
 
-Device IP addresses shown in telemetry often display as `::1` (localhost IPv6) because traffic arrives via a local reverse proxy or tunnel before reaching SmartLayerProxy.
+SmartLayerProxy derives the real client IP for HTTP telemetry as follows:
 
-## HTTP API Routes: X-Forwarded-For Support
+1. If the **immediate peer** (`req.socket.remoteAddress`) is in the trusted proxy list (default `127.0.0.1`, `::1`), use the **leftmost** `X-Forwarded-For` entry (or `CF-Connecting-IP`).
+2. Else if legacy `TRUST_PROXY=true`, trust XFF from any peer.
+3. Otherwise use the socket peer address.
 
-For HTTP routes, the proxy can now honor standard forwarding headers when configured:
-
-- Set environment variable `TRUST_PROXY=true` (or `trust.proxy=true` in application.properties)
-- SmartLayerProxy will extract the real client IP from:
-  - `X-Forwarded-For` header (takes first IP from comma-separated list)
-  - `CF-Connecting-IP` header (Cloudflare)
-
-**Example:**
 ```bash
-export TRUST_PROXY=true
+# Trusted peers for XFF + PROXY protocol (default loopback)
+PROXY_PROTOCOL_TRUSTED=127.0.0.1,::1
+# Alias:
+# TRUSTED_PROXIES=127.0.0.1,::1
+
+# Legacy: trust XFF from any peer
+# TRUST_PROXY=true
 ```
 
-This applies to all HTTP-based device API routes:
-- `GET /api/getEthAddress`
-- `GET /api/:Address/:method`
-- `GET /api/async/:Address/:method`
-- `GET /api/bridge/:Address/:data`
-- `GET /api/bridge/login`
+This matches Caddy → SSH reverse tunnel → SLP, where the peer is loopback and Caddy sets `X-Forwarded-For` to the browser/device IP.
 
-## TCP Socket Connections: PROXY Protocol
+Applies to device API routes, bridge login, zigbee diagnostics, and all telemetry writers that store `ip`.
 
-For raw TCP connections (port 8082), the current implementation cannot read IP forwarding information because:
+## TCP bridge: PROXY protocol
 
-1. TCP sockets don't have HTTP headers
-2. The socket's `remoteAddress` reflects the immediate peer (the reverse proxy/tunnel)
+Raw TCP (port **8082**) optionally accepts a PROXY protocol header as the first bytes of each connection:
 
-### Potential Solution: PROXY Protocol
+- **v1** text (`PROXY TCP4 …\r\n`) and **v2** binary
+- Header may arrive split across chunks; max length capped; **500ms** read timeout
+- If present and peer is trusted → parse source IP/port, strip header, use as client IP
+- If absent → behaviour unchanged (direct device connections keep working)
+- Untrusted peers: `PROXY_PROTOCOL_UNTRUSTED=ignore` (default, treat as app data) or `reject`
 
-The **PROXY protocol** (v1 or v2) prepends connection metadata (real client IP, port) to the TCP stream before application data. This is supported by:
+See [caddy-layer4.md](./caddy-layer4.md) for building Caddy with caddy-l4 and enabling `proxy_protocol v1` on the public TCP listener.
 
-- HAProxy
-- nginx (with `proxy_protocol` directive)
-- AWS ELB/NLB
-- Cloudflare Spectrum
+## Telemetry IP population
 
-**Implementation would require:**
+| Event | IP source |
+|-------|-----------|
+| `connect` | TCP PROXY / socket, or UDP peer |
+| `disconnect` | Session IP / socket |
+| `api_call` | HTTP derived client IP (XFF when trusted) |
+| `firmware_notify` | Session IP when available |
+| `firmware_revoke_*` | Admin HTTP client IP (requested/cancelled) or device TCP IP (delivered/acknowledged/completed) |
+| `device_diagnostics` | TCP client IP / session |
+| `get_challenge_failed` | HTTP derived client IP + rolling per-IP counts |
 
-1. Detecting and parsing PROXY protocol header on new TCP connections
-2. Extracting the real client IP before processing authentication opcodes
-3. Stripping the PROXY header from the data stream
+## getChallenge failures
 
-**Example PROXY v1 header:**
-```
-PROXY TCP4 192.168.1.100 10.0.0.1 50123 8082\r\n
-```
+Every unsuccessful `getChallenge` emits `get_challenge_failed` with reason (`device_offline`, `timeout`, `empty_response`, `bad_response`, `exception`, …), duration ms, target device, optional firmware project, and in-memory request counts for that IP over the last 60s / 10 minutes. Successful getChallenge still uses the existing `api_call` row; the same counter logs a warning on high rate (≥30 / 60s).
 
-This feature is **not implemented** in the current release. TCP connections will continue to show the tunnel/proxy IP address until PROXY protocol support is added.
-
-### Workarounds
-
-- For development/testing: disable the tunnel and connect directly
-- For production: accept that TCP telemetry shows proxy IPs, or implement PROXY protocol support
+`npm run telemetry:pull` / `telemetry:analyse` include the new event type.
 
 ## References
 
 - [PROXY protocol specification](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt)
-- [nginx proxy_protocol](https://docs.nginx.com/nginx/admin-guide/load-balancer/using-proxy-protocol/)
+- [caddy-l4 proxy_protocol](https://github.com/mholt/caddy-l4/blob/master/docs/handlers/proxy.md)

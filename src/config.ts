@@ -1,5 +1,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
+import { parseTrustedProxies } from './util/ip';
+import type { ProxyProtocolUntrustedAction } from './util/proxyProtocol';
 
 export interface Config {
   serverPort: number;
@@ -14,6 +16,17 @@ export interface Config {
   telemetryFeedMaxLimit: number;
   firmwareUploadMaxSizeMb: number;
   trustProxy: boolean;
+  /**
+   * Peers allowed to send PROXY protocol / whose X-Forwarded-For we trust.
+   * Default: 127.0.0.1,::1 (SSH reverse-tunnel / local Caddy).
+   */
+  proxyProtocolTrusted: string[];
+  /**
+   * When an untrusted peer sends a PROXY-looking header:
+   * - ignore (default): treat bytes as application data (do not rewrite IP)
+   * - reject: close the connection
+   */
+  proxyProtocolUntrusted: ProxyProtocolUntrustedAction;
   /** Comma-separated shared product tokens for Zigbee gateway diagnostics (X-ZBGW-Diag). */
   zbgwDiagTokens: string[];
   zigbeeDbPath: string;
@@ -78,6 +91,15 @@ export function loadConfig(): Config {
       process.env.FIRMWARE_UPLOAD_MAX_SIZE_MB || props['firmware.upload.max.size.mb'] || '10', 10
     ),
     trustProxy: (process.env.TRUST_PROXY || props['trust.proxy'] || 'false').toLowerCase() === 'true',
+    proxyProtocolTrusted: parseTrustedProxies(
+      process.env.PROXY_PROTOCOL_TRUSTED ||
+        process.env.TRUSTED_PROXIES ||
+        props['proxy.protocol.trusted'] ||
+        props['trusted.proxies']
+    ),
+    proxyProtocolUntrusted: parseUntrustedAction(
+      process.env.PROXY_PROTOCOL_UNTRUSTED || props['proxy.protocol.untrusted']
+    ),
     zbgwDiagTokens: parseAddressList(
       process.env.ZBGW_DIAG_TOKENS || props['zbgw.diag.tokens']
     ),
@@ -86,4 +108,9 @@ export function loadConfig(): Config {
       props['zigbee.db.path'] ||
       telemetryDbPath.replace(/telemetry\.db$/, 'zigbee.db'),
   };
+}
+
+function parseUntrustedAction(value?: string): ProxyProtocolUntrustedAction {
+  const v = (value || 'ignore').toLowerCase().trim();
+  return v === 'reject' ? 'reject' : 'ignore';
 }

@@ -121,7 +121,11 @@ export class ASyncService {
         const instance = instances[instances.length - 1];
         if (now > instance.getValidationTime() + CONNECTION_CLEANUP_TIME) {
           console.log('Removing old client:', instance.getEthAddress());
-          this.telemetry.recordDeviceDisconnect(instance.getEthAddress(), 'timeout');
+          this.telemetry.recordDeviceDisconnect(
+            instance.getEthAddress(),
+            'timeout',
+            instance.getIPAddress()
+          );
           this.IoTAddrToQueryID.delete(addr);
           this.addressToClient.delete(addr);
           break;
@@ -132,7 +136,11 @@ export class ASyncService {
     for (const [sessionToken, instance] of this.tokenToClient) {
       if (now > instance.getValidationTime() + CONNECTION_CLEANUP_TIME) {
         console.log('Removing old token:', sessionToken.toString(16), instance.getEthAddress());
-        this.telemetry.recordDeviceDisconnect(instance.getEthAddress(), 'timeout');
+        this.telemetry.recordDeviceDisconnect(
+          instance.getEthAddress(),
+          'timeout',
+          instance.getIPAddress()
+        );
         this.tokenToClient.delete(sessionToken);
         break;
       }

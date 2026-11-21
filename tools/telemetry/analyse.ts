@@ -40,7 +40,17 @@ interface Event {
   id: number;
   timestamp: number;
   device: string;
-  eventType: 'connect' | 'disconnect' | 'api_call';
+  eventType:
+    | 'connect'
+    | 'disconnect'
+    | 'api_call'
+    | 'firmware_notify'
+    | 'firmware_revoke_requested'
+    | 'firmware_revoke_delivered'
+    | 'firmware_revoke_acknowledged'
+    | 'firmware_revoke_completed'
+    | 'firmware_revoke_cancelled'
+    | 'get_challenge_failed';
   protocol?: 'UDP' | 'TCP';
   disconnectReason?: string;
   apiMethod?: string;
@@ -48,6 +58,10 @@ interface Event {
   apiResponseTime?: number;
   ipAddress?: string;
   firmwareVersion?: string;
+  firmwareProject?: string;
+  failureReason?: string;
+  requests60s?: number;
+  requests10m?: number;
 }
 
 interface DeviceSession {
@@ -351,7 +365,55 @@ function analyzeSilentDevice(device: SilentDevice): SilentDeviceAnalysis {
   };
 }
 
-function generateMarkdownReport(analyses: Map<string, DeviceAnalysis>, silentDevices?: SilentDeviceAnalysis[]): string {
+function summarizeGetChallengeFailures(events: Event[]): string {
+  const failures = events.filter(e => e.eventType === 'get_challenge_failed');
+  if (failures.length === 0) {
+    return '';
+  }
+
+  let md = '## getChallenge Failures (DDoS / flood tracing)\n\n';
+  md += `Total \`get_challenge_failed\` events: ${failures.length}\n\n`;
+
+  const byIp = new Map<string, { count: number; reasons: Map<string, number>; max60: number; max10m: number }>();
+  const byReason = new Map<string, number>();
+
+  for (const ev of failures) {
+    const ip = ev.ipAddress || 'unknown';
+    const entry = byIp.get(ip) || { count: 0, reasons: new Map(), max60: 0, max10m: 0 };
+    entry.count++;
+    const reason = ev.failureReason || 'unknown';
+    entry.reasons.set(reason, (entry.reasons.get(reason) || 0) + 1);
+    entry.max60 = Math.max(entry.max60, ev.requests60s || 0);
+    entry.max10m = Math.max(entry.max10m, ev.requests10m || 0);
+    byIp.set(ip, entry);
+    byReason.set(reason, (byReason.get(reason) || 0) + 1);
+  }
+
+  md += '**By reason:**\n\n';
+  for (const [reason, count] of Array.from(byReason.entries()).sort((a, b) => b[1] - a[1])) {
+    md += `- \`${reason}\`: ${count}\n`;
+  }
+  md += '\n';
+
+  md += '**Top client IPs:**\n\n';
+  const topIps = Array.from(byIp.entries()).sort((a, b) => b[1].count - a[1].count).slice(0, 15);
+  for (const [ip, stats] of topIps) {
+    const reasons = Array.from(stats.reasons.entries()).map(([r, c]) => `${r}=${c}`).join(', ');
+    md += `- \`${ip}\`: ${stats.count} failures`;
+    if (stats.max60 || stats.max10m) {
+      md += ` (peak counters: ${stats.max60}/60s, ${stats.max10m}/10m)`;
+    }
+    md += ` — ${reasons}\n`;
+  }
+  md += '\n';
+  return md;
+}
+
+function generateMarkdownReport(
+  analyses: Map<string, DeviceAnalysis>,
+  silentDevices?: SilentDeviceAnalysis[],
+  allEvents?: Event[]
+): string {
   let md = '# Telemetry Analysis Report\n\n';
   md += `Generated: ${new Date().toISOString()}\n\n`;
   md += `Total devices analyzed: ${analyses.size}\n\n`;
@@ -363,10 +425,18 @@ function generateMarkdownReport(analyses: Map<string, DeviceAnalysis>, silentDev
   md += `- Devices with issues: ${withIssues.length}\n`;
   md += `- Devices with reconnect storms: ${Array.from(analyses.values()).filter(a => a.reconnectStorm).length}\n`;
   md += `- Devices with auth failures: ${Array.from(analyses.values()).filter(a => a.authFailures > 0).length}\n`;
+  if (allEvents) {
+    const gcf = allEvents.filter(e => e.eventType === 'get_challenge_failed').length;
+    md += `- getChallenge failures: ${gcf}\n`;
+  }
   if (silentDevices) {
     md += `- Silent devices (expected but not connecting): ${silentDevices.filter(d => !d.device.retired).length}\n`;
   }
   md += '\n';
+
+  if (allEvents) {
+    md += summarizeGetChallengeFailures(allEvents);
+  }
 
   if (silentDevices && silentDevices.length > 0) {
     md += '## Silent Devices\n\n';
@@ -599,7 +669,7 @@ async function main() {
     }
   }
 
-  const report = generateMarkdownReport(analyses, silentAnalyses);
+  const report = generateMarkdownReport(analyses, silentAnalyses, events);
   console.log(report);
 }
 
