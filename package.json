@@ -17,7 +17,10 @@
     "telemetry:zigbee:pull": "ts-node tools/telemetry/pull-zigbee.ts",
     "telemetry:zigbee:analyse": "ts-node tools/telemetry/analyse-zigbee.ts",
     "telemetry:all": "ts-node tools/telemetry/all.ts",
-    "firmware:upload": "ts-node tools/firmware/upload.ts"
+    "firmware:upload": "ts-node tools/firmware/upload.ts",
+    "firmware:upload-setup": "ts-node tools/firmware/upload-setup.ts",
+    "firmware:revoke": "ts-node tools/firmware/revoke.ts",
+    "firmware:revoke:cancel": "ts-node tools/firmware/revoke.ts --cancel"
   },
   "engines": {
     "node": ">=20.0.0"

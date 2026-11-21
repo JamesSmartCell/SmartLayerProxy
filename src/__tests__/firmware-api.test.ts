@@ -73,6 +73,10 @@ describe('Firmware API', () => {
       getDeviceAddress: async () => '',
       handleDeviceConnection: () => '',
       getLoginChallenge: () => '',
+      getConnectedDevices: () => [],
+      sendApiCallToDevice: async () => {},
+      trySendApiCallToDevice: () => false,
+      deliverPendingRevoke: () => false,
     } as any;
     
     app.use('/api', createRouter(mockService, mockTcpService));

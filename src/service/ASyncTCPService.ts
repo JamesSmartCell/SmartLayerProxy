@@ -7,6 +7,10 @@ import { loadConfig } from '../config';
 import { getEthereumMessageHash, recoverAddressFromSignature } from '../crypto/signature';
 import { TelemetryService } from './TelemetryService';
 import { FirmwareVersionParser } from './FirmwareVersionParser';
+import {
+  FirmwareService,
+  normalizeDeviceAddress,
+} from './FirmwareService';
 
 // ESP TcpBridge treats 5 minutes without a server packet as a dead session, and
 // it checks that *before* reading the inbound 0x06. Send keepalives sooner.
@@ -373,6 +377,11 @@ export class ASyncTCPService implements TCPCallback {
           this.touchPin(addrLower, ip);
           console.log('Authenticated #' + index, addrLower, firmwareVersion ? `fw=${firmwareVersion}` : '(legacy)');
           this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip, firmwareVersion);
+          // Deliver queued revoke notices / detect setup-firmware reappearance after auth.
+          // Defer so the auth response path is not blocked by the outbound API call.
+          setImmediate(() => {
+            void this.handlePostLoginRevoke(addrLower, firmwareVersion);
+          });
           return;
         }
         this.dropUnauth(client, index, 'bad signature');
@@ -428,13 +437,15 @@ export class ASyncTCPService implements TCPCallback {
         }
         const addrLower = client.getAddress().toLowerCase();
         this.touchPin(addrLower, client.getRemoteIp());
+        const responseText = message.subarray(0, 1024).toString('utf-8');
         let list = this.clientResponse.get(addrLower);
         if (!list) {
           list = [];
           this.clientResponse.set(addrLower, list);
         }
         if (list.length > 8) list.shift();
-        list.push(message.subarray(0, 1024).toString('utf-8'));
+        list.push(responseText);
+        this.maybeAcknowledgeRevoke(addrLower, responseText);
         return;
       }
       case 0x06:
@@ -480,6 +491,11 @@ export class ASyncTCPService implements TCPCallback {
       const addr = client.getAddress()?.toLowerCase();
       if (addr) {
         this.telemetry.recordDeviceDisconnect(addr, reason);
+        try {
+          FirmwareService.getInstance().markRevokeDisconnectedAfterDelivery(addr);
+        } catch {
+          // Firmware DB may not be initialized in some test setups
+        }
       }
       this.clientIndexList.delete(index);
       if (addr && this.clientMap.get(addr) === index) {
@@ -565,6 +581,135 @@ export class ASyncTCPService implements TCPCallback {
     if (!client || !client.isAlive()) return;
 
     client.sendMessage(method, argMap);
+  }
+
+  /**
+   * Returns true if the device is currently connected and accepted the write.
+   * Unlike sendApiCallToDevice, this reports whether a live client was found.
+   */
+  trySendApiCallToDevice(address: string, method: string, argMap: MultiValueMap): boolean {
+    const addrLower = address.toLowerCase();
+    const idx = this.clientMap.get(addrLower);
+    if (idx === undefined) return false;
+
+    const client = this.clientIndexList.get(idx);
+    if (!client || !client.isAlive()) return false;
+
+    client.sendMessage(method, argMap);
+    return true;
+  }
+
+  /**
+   * Attempt immediate delivery of a pending revoke notice to a connected device.
+   * Returns true if the notice was written to the TCP socket.
+   */
+  deliverPendingRevoke(deviceAddress: string): boolean {
+    let firmware: FirmwareService;
+    try {
+      firmware = FirmwareService.getInstance();
+    } catch {
+      return false;
+    }
+
+    const pending = firmware.getPendingRevoke(deviceAddress);
+    if (!pending) return false;
+
+    const args = firmware.buildRevokeNoticeArgs(pending);
+    const sent = this.trySendApiCallToDevice(pending.device, 'updateReady', args);
+    if (!sent) return false;
+
+    firmware.markRevokeDelivered(pending.id);
+    this.telemetry.recordFirmwareRevoke(
+      pending.device,
+      pending.project,
+      'delivered',
+      pending.setupVersion
+    );
+    console.log(
+      'Delivered revoke notice to',
+      pending.device,
+      'project',
+      pending.project,
+      'setup',
+      pending.setupVersion
+    );
+    return true;
+  }
+
+  /**
+   * Device API response after updateReady(purpose=revoke). App firmware should
+   * reply with "revoking" before setting stay_portal and OTA-installing setup.
+   */
+  private maybeAcknowledgeRevoke(deviceAddress: string, responseText: string): void {
+    const trimmed = responseText.trim().toLowerCase();
+    if (!trimmed.startsWith('revoking')) return;
+
+    let firmware: FirmwareService;
+    try {
+      firmware = FirmwareService.getInstance();
+    } catch {
+      return;
+    }
+
+    const active = firmware.getActiveRevoke(deviceAddress);
+    if (!active) return;
+    if (active.status !== 'pending' && active.status !== 'delivered') return;
+
+    const updated = firmware.markRevokeAcknowledged(active.id);
+    if (!updated || updated.status !== 'acknowledged') return;
+
+    this.telemetry.recordFirmwareRevoke(
+      active.device,
+      active.project,
+      'acknowledged',
+      active.setupVersion
+    );
+    console.log('Revoke acknowledged by device', active.device, 'project', active.project);
+  }
+
+  private handlePostLoginRevoke(deviceAddress: string, firmwareVersion?: string): void {
+    let firmware: FirmwareService;
+    try {
+      firmware = FirmwareService.getInstance();
+    } catch {
+      return;
+    }
+
+    const device = normalizeDeviceAddress(deviceAddress);
+    const active = firmware.getActiveRevoke(device);
+    if (!active) return;
+
+    const parsed = firmwareVersion ? FirmwareVersionParser.parse(firmwareVersion) : null;
+
+    // Setup firmware stays in captive portal (NVS stay_portal) and typically does
+    // NOT TCP-login. Observable completion is the *app* reappearing after the
+    // device disconnected post-delivery/ack (OTA → portal → Done → app OTA).
+    const appReappeared =
+      !!parsed && parsed.project.toLowerCase() === active.project.toLowerCase();
+    const revokeSettled =
+      active.status === 'acknowledged' ||
+      (active.status === 'delivered' && active.disconnectedAfterDelivery);
+    if (appReappeared && revokeSettled) {
+      firmware.markRevokeCompleted(active.id);
+      this.telemetry.recordFirmwareRevoke(
+        device,
+        active.project,
+        'completed',
+        active.setupVersion,
+        firmwareVersion
+      );
+      console.log(
+        'Revoke completed — app firmware reappeared for',
+        device,
+        firmwareVersion || '(no version)'
+      );
+      return;
+    }
+
+    // Still on app firmware with a pending revoke: deliver now.
+    if (active.status === 'pending') {
+      this.deliverPendingRevoke(device);
+    }
   }
 
   getLoginChallenge(remoteAddr: string): string {
