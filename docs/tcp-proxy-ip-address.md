@@ -34,6 +34,29 @@ Raw TCP (port **8082**) optionally accepts a PROXY protocol header as the first 
 
 See [caddy-layer4.md](./caddy-layer4.md) for building Caddy with caddy-l4 and enabling `proxy_protocol v1` on the public TCP listener.
 
+## Session IP pinning
+
+After an ESP device completes the signed login handshake (including refresh auth), the TCP session records the **resolved** client IP as its pin.
+
+- Later commands / responses / re-challenge / refresh auth on **that session** must come from the same resolved IP.
+- A **fresh full login on a new connection** always re-pins (ISP / CGNAT changes do not permanently lock a device out).
+- Loopback or empty IPs (legacy tunnel path without a PROXY header) are **not** pinned or enforced; a skip is logged.
+
+```bash
+# off | log (default) | enforce
+IP_PIN_MODE=log
+```
+
+| Mode | Behaviour |
+|------|-----------|
+| `off` | Disabled |
+| `log` (default) | Mismatch → journal + `ip_pin_violation` telemetry; traffic still allowed |
+| `enforce` | Mismatch → journal + telemetry; drop and terminate the session |
+
+Default is **`log`**: PROXY rollout may still have mixed legacy peers, so enforce is safer after you confirm real IPs in journals/telemetry.
+
+Handshake / command journal lines include the resolved IP, e.g. `Receive Command: 01b1a692 #0 ip=144.6.2.81 (peer ::1)`.
+
 ## Telemetry IP population
 
 | Event | IP source |
@@ -45,12 +68,13 @@ See [caddy-layer4.md](./caddy-layer4.md) for building Caddy with caddy-l4 and en
 | `firmware_revoke_*` | Admin HTTP client IP (requested/cancelled) or device TCP IP (delivered/acknowledged/completed) |
 | `device_diagnostics` | TCP client IP / session |
 | `get_challenge_failed` | HTTP derived client IP + rolling per-IP counts |
+| `ip_pin_violation` | Offending IP in `ip`; pinned IP + connection id + mode in `failureReason`; opcode in `apiMethod` |
 
 ## getChallenge failures
 
 Every unsuccessful `getChallenge` emits `get_challenge_failed` with reason (`device_offline`, `timeout`, `empty_response`, `bad_response`, `exception`, …), duration ms, target device, optional firmware project, and in-memory request counts for that IP over the last 60s / 10 minutes. Successful getChallenge still uses the existing `api_call` row; the same counter logs a warning on high rate (≥30 / 60s).
 
-`npm run telemetry:pull` / `telemetry:analyse` include the new event type.
+`npm run telemetry:pull` / `telemetry:analyse` include `get_challenge_failed` and `ip_pin_violation`.
 
 ## References
 

@@ -73,6 +73,12 @@ Environment variables (or `application.properties` file):
 - **Proxy Public URL:**
   - `PROXY_PUBLIC_URL` - Public base URL for camera upload callbacks (e.g., `https://proxy.percolate.one`)
 
+- **Client IP / PROXY protocol / session pin:**
+  - `PROXY_PROTOCOL_TRUSTED` — peers allowed to send PROXY / whose XFF is trusted (default loopback)
+  - `PROXY_PROTOCOL_UNTRUSTED` — `ignore` (default) or `reject` for untrusted PROXY headers
+  - `TRUST_PROXY` — legacy: trust XFF from any peer
+  - `IP_PIN_MODE` — `off` | `log` (default) | `enforce`: after ESP login, pin the TCP session to the resolved client IP; see `docs/tcp-proxy-ip-address.md`
+
 See `.env.example` for all available configuration options.
 
 ## API Endpoints

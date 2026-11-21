@@ -18,7 +18,8 @@ export type TelemetryEventType =
   | 'firmware_revoke_acknowledged'
   | 'firmware_revoke_completed'
   | 'firmware_revoke_cancelled'
-  | 'get_challenge_failed';
+  | 'get_challenge_failed'
+  | 'ip_pin_violation';
 
 export type GetChallengeFailReason =
   | 'device_offline'
@@ -364,6 +365,49 @@ export class TelemetryService {
       options.project || null,
       options.requests60s ?? null,
       options.requests10m ?? null
+    );
+  }
+
+  /**
+   * Session IP pin mismatch: command or re-auth from a different resolved IP
+   * than the one recorded at login.
+   *
+   * Stored fields:
+   * - ip_address: offending (current) IP
+   * - failure_reason: pinned=<ip>;conn=#N;mode=log|enforce
+   * - api_method: opcode/method that triggered the check
+   * - firmware_project: device project when known
+   */
+  recordIpPinViolation(options: {
+    address: string;
+    project?: string;
+    pinnedIp: string;
+    offendingIp: string;
+    opcodeOrMethod: string;
+    connectionId: number | string;
+    mode: 'log' | 'enforce';
+  }): void {
+    const normalized = (options.address || 'unknown').toLowerCase();
+    const now = Date.now();
+    const conn =
+      typeof options.connectionId === 'number'
+        ? `#${options.connectionId}`
+        : String(options.connectionId);
+    const reason = `pinned=${options.pinnedIp};conn=${conn};mode=${options.mode}`;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO device_events (
+        timestamp, device, event_type, api_method, api_success,
+        ip_address, failure_reason, firmware_project
+      ) VALUES (?, ?, 'ip_pin_violation', ?, 0, ?, ?, ?)
+    `);
+    stmt.run(
+      now,
+      normalized,
+      options.opcodeOrMethod,
+      options.offendingIp || null,
+      reason,
+      options.project || null
     );
   }
 

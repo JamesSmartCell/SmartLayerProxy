@@ -50,7 +50,8 @@ interface Event {
     | 'firmware_revoke_acknowledged'
     | 'firmware_revoke_completed'
     | 'firmware_revoke_cancelled'
-    | 'get_challenge_failed';
+    | 'get_challenge_failed'
+    | 'ip_pin_violation';
   protocol?: 'UDP' | 'TCP';
   disconnectReason?: string;
   apiMethod?: string;
@@ -409,6 +410,49 @@ function summarizeGetChallengeFailures(events: Event[]): string {
   return md;
 }
 
+function summarizeIpPinViolations(events: Event[]): string {
+  const violations = events.filter(e => e.eventType === 'ip_pin_violation');
+  if (violations.length === 0) {
+    return '';
+  }
+
+  let md = '## Session IP Pin Violations\n\n';
+  md += `Total \`ip_pin_violation\` events: ${violations.length}\n\n`;
+
+  const byDevice = new Map<string, number>();
+  const byMethod = new Map<string, number>();
+
+  for (const ev of violations) {
+    byDevice.set(ev.device, (byDevice.get(ev.device) || 0) + 1);
+    const method = ev.apiMethod || 'unknown';
+    byMethod.set(method, (byMethod.get(method) || 0) + 1);
+  }
+
+  md += '**By device:**\n\n';
+  for (const [device, count] of Array.from(byDevice.entries()).sort((a, b) => b[1] - a[1]).slice(0, 20)) {
+    md += `- \`${device}\`: ${count}\n`;
+  }
+  md += '\n';
+
+  md += '**By opcode/method:**\n\n';
+  for (const [method, count] of Array.from(byMethod.entries()).sort((a, b) => b[1] - a[1])) {
+    md += `- \`${method}\`: ${count}\n`;
+  }
+  md += '\n';
+
+  md += '**Recent samples:**\n\n';
+  for (const ev of violations.slice(-10)) {
+    const time = new Date(ev.timestamp).toISOString();
+    md += `- ${time}: device=\`${ev.device}\` offending=\`${ev.ipAddress || '?'}\``;
+    if (ev.failureReason) md += ` ${ev.failureReason}`;
+    if (ev.apiMethod) md += ` method=\`${ev.apiMethod}\``;
+    if (ev.firmwareProject) md += ` project=\`${ev.firmwareProject}\``;
+    md += '\n';
+  }
+  md += '\n';
+  return md;
+}
+
 function generateMarkdownReport(
   analyses: Map<string, DeviceAnalysis>,
   silentDevices?: SilentDeviceAnalysis[],
@@ -428,6 +472,8 @@ function generateMarkdownReport(
   if (allEvents) {
     const gcf = allEvents.filter(e => e.eventType === 'get_challenge_failed').length;
     md += `- getChallenge failures: ${gcf}\n`;
+    const ipv = allEvents.filter(e => e.eventType === 'ip_pin_violation').length;
+    md += `- IP pin violations: ${ipv}\n`;
   }
   if (silentDevices) {
     md += `- Silent devices (expected but not connecting): ${silentDevices.filter(d => !d.device.retired).length}\n`;
@@ -436,6 +482,7 @@ function generateMarkdownReport(
 
   if (allEvents) {
     md += summarizeGetChallengeFailures(allEvents);
+    md += summarizeIpPinViolations(allEvents);
   }
 
   if (silentDevices && silentDevices.length > 0) {
