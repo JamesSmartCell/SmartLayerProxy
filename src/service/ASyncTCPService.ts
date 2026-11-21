@@ -11,6 +11,11 @@ import {
   FirmwareService,
   normalizeDeviceAddress,
 } from './FirmwareService';
+import { isTrustedProxyPeer } from '../util/ip';
+import {
+  resolveProxyProtocol,
+  ProxyProtocolError,
+} from '../util/proxyProtocol';
 
 // ESP TcpBridge treats 5 minutes without a server packet as a dead session, and
 // it checks that *before* reading the inbound 0x06. Send keepalives sooner.
@@ -127,10 +132,11 @@ export class ASyncTCPService implements TCPCallback {
         return;
       }
       const index = this.clientIndex++;
-      console.log('New client connected: #' + index, normalizeRemoteIp(socket.remoteAddress));
+      const peerIp = normalizeRemoteIp(socket.remoteAddress);
+      console.log('New client connected: #' + index, peerIp);
       const client = new TCPClient(socket, this, index);
       this.clientIndexList.set(index, client);
-      client.start();
+      void this.beginClient(socket, client, index, peerIp);
     });
     this.server.on('error', (err) => {
       console.error('TCP server error:', err instanceof Error ? err.message : err);
@@ -139,6 +145,78 @@ export class ASyncTCPService implements TCPCallback {
     this.server.listen(config.tcpPort, () => {
       console.log('TCP server listening on port', config.tcpPort);
     });
+  }
+
+  /**
+   * Optionally accept a PROXY protocol header from trusted peers, then start
+   * the normal TCPClient data path. Direct connections (no header) are unchanged.
+   */
+  private async beginClient(
+    socket: net.Socket,
+    client: TCPClient,
+    index: number,
+    peerIp: string
+  ): Promise<void> {
+    const config = loadConfig();
+    const trusted = isTrustedProxyPeer(peerIp, config.proxyProtocolTrusted);
+
+    if (!trusted) {
+      // Untrusted peer: never rewrite IP from PROXY. Optionally reject if header present.
+      if (config.proxyProtocolUntrusted === 'reject') {
+        try {
+          const result = await resolveProxyProtocol(socket, { timeoutMs: 500 });
+          if (result.present) {
+            console.log('Reject PROXY header from untrusted peer #' + index, peerIp);
+            this.clientIndexList.delete(index);
+            socket.destroy();
+            return;
+          }
+          client.start(result.leftover.length ? result.leftover : undefined);
+          socket.resume();
+          return;
+        } catch (err) {
+          // Malformed PROXY from untrusted → reject
+          console.log(
+            'Reject bad PROXY from untrusted peer #' + index,
+            peerIp,
+            err instanceof Error ? err.message : err
+          );
+          this.clientIndexList.delete(index);
+          socket.destroy();
+          return;
+        }
+      }
+      client.start();
+      return;
+    }
+
+    try {
+      const result = await resolveProxyProtocol(socket, { timeoutMs: 500 });
+      if (result.present && result.clientIp) {
+        client.setRemoteIp(result.clientIp);
+        console.log(
+          'PROXY protocol #' + index,
+          'peer',
+          peerIp,
+          '-> client',
+          result.clientIp,
+          result.version ? `v${result.version}` : ''
+        );
+      } else if (result.present) {
+        console.log('PROXY protocol #' + index, 'present but no source IP (UNKNOWN/LOCAL)');
+      }
+      client.start(result.leftover.length ? result.leftover : undefined);
+      socket.resume();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log('PROXY protocol error #' + index, msg);
+      this.clientIndexList.delete(index);
+      if (err instanceof ProxyProtocolError) {
+        socket.destroy();
+        return;
+      }
+      socket.destroy();
+    }
   }
 
   private sendKeepAlive(): void {
@@ -424,7 +502,7 @@ export class ASyncTCPService implements TCPCallback {
           networkIndex,
           lastFailureStage: decodeFailureStage(lastFailureStage),
           wifiDisconnectReason: decodeWifiDisconnectReason(lastDisconnectReason),
-        });
+        }, client.getRemoteIp());
         return;
       }
       case 0x04:
@@ -490,7 +568,7 @@ export class ASyncTCPService implements TCPCallback {
       console.log('Disconnect: #' + index, 'reason:', reason);
       const addr = client.getAddress()?.toLowerCase();
       if (addr) {
-        this.telemetry.recordDeviceDisconnect(addr, reason);
+        this.telemetry.recordDeviceDisconnect(addr, reason, client.getRemoteIp());
         try {
           FirmwareService.getInstance().markRevokeDisconnectedAfterDelivery(addr);
         } catch {
@@ -599,6 +677,14 @@ export class ASyncTCPService implements TCPCallback {
     return true;
   }
 
+  /** Live TCP peer IP for a connected device (after PROXY rewrite when present). */
+  getDeviceIp(address: string): string | undefined {
+    const idx = this.liveIndexForAddress(address.toLowerCase());
+    if (idx === undefined) return undefined;
+    const ip = this.clientIndexList.get(idx)?.getRemoteIp();
+    return ip || undefined;
+  }
+
   /**
    * Attempt immediate delivery of a pending revoke notice to a connected device.
    * Returns true if the notice was written to the TCP socket.
@@ -623,7 +709,9 @@ export class ASyncTCPService implements TCPCallback {
       pending.device,
       pending.project,
       'delivered',
-      pending.setupVersion
+      pending.setupVersion,
+      undefined,
+      this.getDeviceIp(pending.device)
     );
     console.log(
       'Delivered revoke notice to',
@@ -662,7 +750,9 @@ export class ASyncTCPService implements TCPCallback {
       active.device,
       active.project,
       'acknowledged',
-      active.setupVersion
+      active.setupVersion,
+      undefined,
+      this.getDeviceIp(active.device)
     );
     console.log('Revoke acknowledged by device', active.device, 'project', active.project);
   }
@@ -696,7 +786,8 @@ export class ASyncTCPService implements TCPCallback {
         active.project,
         'completed',
         active.setupVersion,
-        firmwareVersion
+        firmwareVersion,
+        this.getDeviceIp(device)
       );
       console.log(
         'Revoke completed — app firmware reappeared for',

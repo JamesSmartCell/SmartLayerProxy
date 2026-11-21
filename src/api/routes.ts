@@ -18,8 +18,12 @@ import {
 } from '../service/ZigbeeDiagnosticsService';
 import { loadConfig } from '../config';
 import { FirmwareVersionParser } from '../service/FirmwareVersionParser';
+import { deriveHttpClientIpFromRequest, IpRateCounter } from '../util/ip';
+import type { GetChallengeFailReason } from '../service/TelemetryService';
 
 const CHECK_CONNECTION_INTERVAL_MS = 5 * 60 * 1000;
+/** In-memory getChallenge request counts per client IP (success + failure). */
+const getChallengeIpCounter = new IpRateCounter();
 
 /** Base URL for camera upload (e.g. https://proxy.percolate.one) */
 function getProxyBaseUrl(req: Request): string {
@@ -36,14 +40,18 @@ function normalizeAddress(addr: string): string {
 
 function getClientIp(req: Request): string {
   const config = loadConfig();
-  if (config.trustProxy) {
-    const forwardedFor = req.get('x-forwarded-for') || req.get('cf-connecting-ip');
-    if (forwardedFor) {
-      const ips = forwardedFor.split(',').map(ip => ip.trim());
-      return ips[0];
-    }
-  }
-  return req.socket.remoteAddress ?? '';
+  return deriveHttpClientIpFromRequest(req, {
+    trustedProxies: config.proxyProtocolTrusted,
+    trustProxy: config.trustProxy,
+  });
+}
+
+function classifyGetChallengeFailure(response: string): GetChallengeFailReason {
+  if (response === 'No device found') return 'device_offline';
+  if (response === 'Timed out') return 'timeout';
+  if (response === '') return 'empty_response';
+  if (response === 'API send error') return 'bad_response';
+  return 'bad_response';
 }
 
 function parseQueryParams(req: Request): Record<string, string[]> {
@@ -180,7 +188,12 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
           id, timestamp, device, event_type as eventType, protocol,
           disconnect_reason as disconnectReason, api_method as apiMethod,
           api_success as apiSuccess, api_response_time as apiResponseTime,
-          ip_address as ipAddress, firmware_version as firmwareVersion
+          ip_address as ipAddress, firmware_version as firmwareVersion,
+          firmware_project as firmwareProject,
+          firmware_notify_version as firmwareNotifyVersion,
+          failure_reason as failureReason,
+          requests_60s as requests60s,
+          requests_10m as requests10m
         FROM device_events
         WHERE id > ?
         ORDER BY id ASC
@@ -226,7 +239,8 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
           connect_time_ms as connectTimeMs,
           network_index as networkIndex,
           last_failure_stage as lastFailureStage,
-          wifi_disconnect_reason as wifiDisconnectReason
+          wifi_disconnect_reason as wifiDisconnectReason,
+          ip_address as ipAddress
         FROM device_diagnostics
         WHERE id > ?
         ORDER BY id ASC
@@ -792,7 +806,9 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         revoke.device,
         project,
         'requested',
-        setup.version
+        setup.version,
+        undefined,
+        getClientIp(req)
       );
 
       const delivered = tcpService.deliverPendingRevoke(normalizeDeviceAddress(device));
@@ -878,7 +894,9 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         cancelled.device,
         project,
         'cancelled',
-        cancelled.setupVersion
+        cancelled.setupVersion,
+        undefined,
+        getClientIp(req)
       );
 
       res.json({
@@ -1588,33 +1606,100 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
       argMap['uploadUrl'] = [uploadUrl];
     }
 
-    const [responseUDP, responseTCP] = await Promise.all([
-      service.getResponse(address, method, argMap, clientDesignator),
-      tcpService.getResponse(address, method, argMap, clientDesignator),
-    ]);
+    const isGetChallenge = method === 'getChallenge';
+    let rateCounts: { last60s: number; last10m: number } | undefined;
+    if (isGetChallenge) {
+      rateCounts = getChallengeIpCounter.record(clientIp);
+    }
 
     // Prefer successful responses over error messages
-    const isSuccess = (r: string) => 
-      r !== 'No device found' && 
-      r !== 'Timed out' && 
+    const isSuccess = (r: string) =>
+      r !== 'No device found' &&
+      r !== 'Timed out' &&
       r !== 'API send error' &&
       r !== '';
-    
+
     let response: string;
-    if (isSuccess(responseTCP)) {
-      response = responseTCP;
-    } else if (isSuccess(responseUDP)) {
-      response = responseUDP;
-    } else {
-      // Both failed, prefer TCP error message
-      response = responseTCP ?? responseUDP;
+    let success: boolean;
+    try {
+      const [responseUDP, responseTCP] = await Promise.all([
+        service.getResponse(address, method, argMap, clientDesignator),
+        tcpService.getResponse(address, method, argMap, clientDesignator),
+      ]);
+
+      if (isSuccess(responseTCP)) {
+        response = responseTCP;
+      } else if (isSuccess(responseUDP)) {
+        response = responseUDP;
+      } else {
+        // Both failed, prefer TCP error message
+        response = responseTCP ?? responseUDP;
+      }
+      success = isSuccess(response);
+    } catch (err) {
+      const responseTime = Date.now() - startTime;
+      if (isGetChallenge) {
+        const connected = tcpService.getConnectedDevices().find((d) => d.address === address.toLowerCase());
+        telemetry.recordGetChallengeFailed({
+          address,
+          ipAddress: clientIp,
+          reason: 'exception',
+          durationMs: responseTime,
+          project: connected?.project,
+          requests60s: rateCounts?.last60s,
+          requests10m: rateCounts?.last10m,
+        });
+        console.warn(
+          '[getChallenge] failed',
+          'ip=' + clientIp,
+          'device=' + address,
+          'reason=exception',
+          'ms=' + responseTime,
+          'req60s=' + rateCounts?.last60s,
+          'req10m=' + rateCounts?.last10m,
+          err instanceof Error ? err.message : err
+        );
+      }
+      throw err;
     }
-    
+
     const responseTime = Date.now() - startTime;
-    const success = isSuccess(response);
-    
-    telemetry.recordApiCall(address, method, success, responseTime);
-    
+
+    // Always record api_call (existing behaviour). getChallenge successes are also
+    // counted in the in-memory per-IP rate counter for flood spotting (no extra row).
+    telemetry.recordApiCall(address, method, success, responseTime, clientIp);
+
+    if (isGetChallenge && !success) {
+      const connected = tcpService.getConnectedDevices().find((d) => d.address === address.toLowerCase());
+      const reason = classifyGetChallengeFailure(response);
+      telemetry.recordGetChallengeFailed({
+        address,
+        ipAddress: clientIp,
+        reason,
+        durationMs: responseTime,
+        project: connected?.project,
+        requests60s: rateCounts?.last60s,
+        requests10m: rateCounts?.last10m,
+      });
+      console.warn(
+        '[getChallenge] failed',
+        'ip=' + clientIp,
+        'device=' + address,
+        'reason=' + reason,
+        'ms=' + responseTime,
+        'req60s=' + rateCounts?.last60s,
+        'req10m=' + rateCounts?.last10m
+      );
+    } else if (isGetChallenge && success && rateCounts && rateCounts.last60s >= 30) {
+      console.warn(
+        '[getChallenge] high rate',
+        'ip=' + clientIp,
+        'device=' + address,
+        'req60s=' + rateCounts.last60s,
+        'req10m=' + rateCounts.last10m
+      );
+    }
+
     res.status(201).send(response);
   }
 
