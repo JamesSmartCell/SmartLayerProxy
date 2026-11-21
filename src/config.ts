@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { parseTrustedProxies } from './util/ip';
+import { parseIpPinMode, type IpPinMode } from './util/ipPin';
 import type { ProxyProtocolUntrustedAction } from './util/proxyProtocol';
 
 export interface Config {
@@ -27,6 +28,13 @@ export interface Config {
    * - reject: close the connection
    */
   proxyProtocolUntrusted: ProxyProtocolUntrustedAction;
+  /**
+   * After ESP login, pin the session to the resolved client IP.
+   * - off: disabled
+   * - log (default): detect mismatches, log + telemetry, do not disconnect
+   * - enforce: reject mismatched commands / re-auth and terminate the session
+   */
+  ipPinMode: IpPinMode;
   /** Comma-separated shared product tokens for Zigbee gateway diagnostics (X-ZBGW-Diag). */
   zbgwDiagTokens: string[];
   zigbeeDbPath: string;
@@ -99,6 +107,9 @@ export function loadConfig(): Config {
     ),
     proxyProtocolUntrusted: parseUntrustedAction(
       process.env.PROXY_PROTOCOL_UNTRUSTED || props['proxy.protocol.untrusted']
+    ),
+    ipPinMode: parseIpPinMode(
+      process.env.IP_PIN_MODE || props['ip.pin.mode']
     ),
     zbgwDiagTokens: parseAddressList(
       process.env.ZBGW_DIAG_TOKENS || props['zbgw.diag.tokens']

@@ -1,6 +1,7 @@
 import * as net from 'net';
 import { MultiValueMap } from '../types';
 import { normalizeIp } from '../util/ip';
+import { formatConnectionIpLog } from '../util/ipPin';
 
 export const CONNECTION_CLEANUP_TIME = 8 * 60 * 1000;
 export const MAX_TCP_PACKET = 4096;
@@ -20,7 +21,12 @@ export class TCPClient {
   private running = false;
   private serverCallback: TCPCallback;
   private address = '';
+  /** Immediate TCP peer (socket.remoteAddress), never overwritten by PROXY. */
+  private peerIp: string;
+  /** Resolved client IP (PROXY source when present, else peer). */
   private remoteIp: string;
+  /** Session IP pin set after successful signed login (enforceable IPs only). */
+  private pinnedIp: string | undefined;
   private clientIndex: number;
   private challenge: Buffer = Buffer.alloc(0);
   private isWaitingForResponse = false;
@@ -33,12 +39,38 @@ export class TCPClient {
     this.lastConnection = Date.now();
     this.serverCallback = callback;
     this.clientIndex = index;
-    this.remoteIp = normalizeRemoteIp(socket.remoteAddress);
+    this.peerIp = normalizeRemoteIp(socket.remoteAddress);
+    this.remoteIp = this.peerIp;
   }
 
-  /** Override peer IP after PROXY protocol parsing (or for tests). */
+  /**
+   * Set resolved client IP after PROXY protocol parsing (or for tests).
+   * Does not change the recorded peer address.
+   */
   setRemoteIp(ip: string): void {
     this.remoteIp = normalizeRemoteIp(ip);
+  }
+
+  /** Test / diagnostics helper to override the recorded peer. */
+  setPeerIp(ip: string): void {
+    this.peerIp = normalizeRemoteIp(ip);
+  }
+
+  getPeerIp(): string {
+    return this.peerIp || normalizeRemoteIp(this.socket.remoteAddress);
+  }
+
+  setPinnedIp(ip: string | undefined): void {
+    this.pinnedIp = ip ? normalizeRemoteIp(ip) : undefined;
+  }
+
+  getPinnedIp(): string | undefined {
+    return this.pinnedIp;
+  }
+
+  /** Log fragment: `#0 ip=144.6.2.81 (peer ::1)` */
+  formatIpLog(): string {
+    return formatConnectionIpLog(this.clientIndex, this.getRemoteIp(), this.getPeerIp());
   }
 
   /**
@@ -61,8 +93,8 @@ export class TCPClient {
         }
         buffer = Buffer.concat([buffer, data]);
         const preview = buffer.subarray(0, 4).toString('hex');
-        const peer = this.getRemoteIp() || '?';
-        console.log('Receive Command:', preview, '#' + this.clientIndex, peer);
+        const ipLog = this.formatIpLog();
+        console.log('Receive Command:', preview, ipLog);
         
         // For opcode 0x09 (auth with version), exclude version bytes from dump
         // to avoid non-printable characters in terminal. Dump only: opcode(1) + addr(20) + sig(65) = 86 bytes
@@ -80,7 +112,7 @@ export class TCPClient {
         }
         
         const dump = dumpBuffer.toString('hex') + suffix;
-        console.log('  -->', dump, '#' + this.clientIndex, peer);
+        console.log('  -->', dump, ipLog);
         this.isWaitingForResponse = false;
         this.lastConnection = Date.now();
         this.serverCallback.receivedMessage(this.clientIndex, buffer);

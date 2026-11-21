@@ -1,6 +1,6 @@
 import * as net from 'net';
 import { ethers } from 'ethers';
-import { CONNECTION_CLEANUP_TIME, normalizeRemoteIp, TCPClient, TCPCallback } from './TCPClient';
+import { normalizeRemoteIp, TCPClient, TCPCallback } from './TCPClient';
 import { APIClient } from './APIClient';
 import { MultiValueMap } from '../types';
 import { loadConfig } from '../config';
@@ -12,6 +12,11 @@ import {
   normalizeDeviceAddress,
 } from './FirmwareService';
 import { isTrustedProxyPeer } from '../util/ip';
+import {
+  evaluateSessionIpPin,
+  resolvePinOnLogin,
+  type IpPinMode,
+} from '../util/ipPin';
 import {
   resolveProxyProtocol,
   ProxyProtocolError,
@@ -113,11 +118,11 @@ export class ASyncTCPService implements TCPCallback {
   private clientLogins = new Map<string, APIClient>();
   private addressToClient = new Map<string, APIClient>();
   private tokenToAddress = new Map<string, string>();
-  /** Signed-in device → last known socket IP. Survives a drop until inactivity. */
-  private devicePins = new Map<string, { ip: string; lastSeen: number }>();
   private telemetry = TelemetryService.getInstance();
+  private ipPinMode: IpPinMode;
 
   constructor() {
+    this.ipPinMode = loadConfig().ipPinMode;
     this.startServer();
     setInterval(() => this.sendKeepAlive(), KEEPALIVE_INTERVAL_MS);
   }
@@ -249,21 +254,6 @@ export class ASyncTCPService implements TCPCallback {
       console.log('REMOVE orphaned client:', addr);
       this.clientMap.delete(addr);
     }
-    this.expirePins();
-  }
-
-  private expirePins(): void {
-    const now = Date.now();
-    for (const [addr, pin] of this.devicePins) {
-      if (now - pin.lastSeen <= CONNECTION_CLEANUP_TIME) continue;
-      this.devicePins.delete(addr);
-      console.log('Expire IP pin:', addr, pin.ip);
-    }
-  }
-
-  private touchPin(addrLower: string, ip: string): void {
-    if (!addrLower || !ip) return;
-    this.devicePins.set(addrLower, { ip, lastSeen: Date.now() });
   }
 
   private liveIndexForAddress(addrLower: string): number | undefined {
@@ -281,14 +271,74 @@ export class ASyncTCPService implements TCPCallback {
     return Date.now() - existing.getLastConnection() > 20_000;
   }
 
-  private pinAllowsIp(addrLower: string, ip: string): boolean {
-    const pin = this.devicePins.get(addrLower);
-    if (!pin) return true;
-    if (Date.now() - pin.lastSeen > CONNECTION_CLEANUP_TIME) {
-      this.devicePins.delete(addrLower);
+  /**
+   * After signed login (or refresh), pin this TCP session to the resolved IP.
+   * Loopback/unknown IPs are not pinned so legacy tunnels keep working.
+   * A fresh full login on a new connection always re-pins (no cross-connection lockout).
+   */
+  private pinSessionIp(client: TCPClient): void {
+    const decision = resolvePinOnLogin(client.getRemoteIp());
+    if ('skip' in decision) {
+      client.setPinnedIp(undefined);
+      console.log(
+        'Skip IP pin (loopback/unknown)',
+        client.formatIpLog(),
+        decision.currentIp || '(empty)'
+      );
+      return;
+    }
+    client.setPinnedIp(decision.pin);
+    console.log('Session IP pinned', client.formatIpLog(), 'pin=' + decision.pin);
+  }
+
+  /**
+   * Check session IP pin for authenticated traffic / re-auth.
+   * Returns false when the message must be dropped (enforce mode violation).
+   */
+  private checkSessionIpPin(
+    client: TCPClient,
+    index: number,
+    opcodeOrMethod: string
+  ): boolean {
+    const decision = evaluateSessionIpPin({
+      mode: this.ipPinMode,
+      pinnedIp: client.getPinnedIp(),
+      currentIp: client.getRemoteIp(),
+    });
+
+    if (decision.action !== 'violation') {
       return true;
     }
-    return pin.ip === ip;
+
+    const addr = client.getAddress()?.toLowerCase() || 'unknown';
+    const project = client.getFirmwareProject();
+    console.log(
+      'IP pin violation',
+      client.formatIpLog(),
+      'device',
+      addr,
+      'pinned',
+      decision.pinnedIp,
+      'offending',
+      decision.currentIp,
+      opcodeOrMethod,
+      'mode=' + decision.mode
+    );
+    this.telemetry.recordIpPinViolation({
+      address: addr,
+      project,
+      pinnedIp: decision.pinnedIp,
+      offendingIp: decision.currentIp,
+      opcodeOrMethod,
+      connectionId: index,
+      mode: decision.mode,
+    });
+
+    if (decision.reject) {
+      client.terminate();
+      return false;
+    }
+    return true;
   }
 
   receivedMessage(index: number, bytes: Buffer): void {
@@ -323,6 +373,13 @@ export class ASyncTCPService implements TCPCallback {
     const message = bytes.subarray(1);
     const authed = Boolean(client.getAddress());
 
+    // Authenticated sessions: every inbound opcode must match the pinned IP
+    // (re-challenge, refresh auth, responses, keepalive, diagnostics, …).
+    if (authed) {
+      const label = '0x' + opcode.toString(16).padStart(2, '0');
+      if (!this.checkSessionIpPin(client, index, label)) return;
+    }
+
     switch (opcode) {
       case 0x01: {
         if (message.length < 20) {
@@ -336,7 +393,7 @@ export class ASyncTCPService implements TCPCallback {
         // Same socket already signed in: ESP handshake retry. Send 0x02 again
         // so it does not sit in handshake for 60s and then ESP.restart().
         if (authed) {
-          console.log('Re-challenge authenticated #' + index);
+          console.log('Re-challenge authenticated', client.formatIpLog());
           client.setChallenge(createChallenge());
           client.sendChallenge();
           return;
@@ -348,13 +405,8 @@ export class ASyncTCPService implements TCPCallback {
           client.terminate();
           return;
         }
-        if (!this.pinAllowsIp(addrLower, ip)) {
-          const pin = this.devicePins.get(addrLower);
-          console.log('Reject login #' + index, address, 'from', ip, '(pinned to', pin?.ip + ')');
-          client.terminate();
-          return;
-        }
-        console.log('RCV: Login:', address, 'from', ip);
+        // Fresh login on a new connection: always allowed; pin is set after signed auth.
+        console.log('RCV: Login:', address, 'from', ip, client.formatIpLog());
         client.setChallenge(createChallenge());
         client.sendChallenge();
         return;
@@ -427,17 +479,19 @@ export class ASyncTCPService implements TCPCallback {
             client.terminate();
             return;
           }
-          if (!this.pinAllowsIp(addrLower, ip)) {
-            const pin = this.devicePins.get(addrLower);
-            console.log('Reject signed login #' + index, recoveredAddr, 'from', ip, '(pinned to', pin?.ip + ')');
-            client.terminate();
-            return;
-          }
           if (authed && client.getAddress().toLowerCase() === addrLower) {
-            console.log('Refresh auth #' + index, addrLower, firmwareVersion ? `fw=${firmwareVersion}` : '');
-            this.touchPin(addrLower, ip);
+            // Refresh / re-auth on an existing session (pin already checked above).
+            console.log(
+              'Refresh auth',
+              client.formatIpLog(),
+              addrLower,
+              firmwareVersion ? `fw=${firmwareVersion}` : ''
+            );
+            this.pinSessionIp(client);
             return;
           }
+          // Fresh full login (or auth for a different address on this socket): re-pin.
+          // Cross-connection ISP changes are allowed — only the live-session check above blocks.
           client.setAddress(recoveredAddr);
           
           if (firmwareVersion) {
@@ -452,8 +506,13 @@ export class ASyncTCPService implements TCPCallback {
           }
           
           this.addToClientMap(recoveredAddr, index);
-          this.touchPin(addrLower, ip);
-          console.log('Authenticated #' + index, addrLower, firmwareVersion ? `fw=${firmwareVersion}` : '(legacy)');
+          this.pinSessionIp(client);
+          console.log(
+            'Authenticated',
+            client.formatIpLog(),
+            addrLower,
+            firmwareVersion ? `fw=${firmwareVersion}` : '(legacy)'
+          );
           this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip, firmwareVersion);
           // Deliver queued revoke notices / detect setup-firmware reappearance after auth.
           // Defer so the auth response path is not blocked by the outbound API call.
@@ -514,7 +573,6 @@ export class ASyncTCPService implements TCPCallback {
           return;
         }
         const addrLower = client.getAddress().toLowerCase();
-        this.touchPin(addrLower, client.getRemoteIp());
         const responseText = message.subarray(0, 1024).toString('utf-8');
         let list = this.clientResponse.get(addrLower);
         if (!list) {
@@ -527,7 +585,6 @@ export class ASyncTCPService implements TCPCallback {
         return;
       }
       case 0x06:
-        if (authed) this.touchPin(client.getAddress().toLowerCase(), client.getRemoteIp());
         return;
       default:
         this.dropUnauth(client, index, 'unknown opcode 0x' + opcode.toString(16));
@@ -578,7 +635,7 @@ export class ASyncTCPService implements TCPCallback {
       this.clientIndexList.delete(index);
       if (addr && this.clientMap.get(addr) === index) {
         this.clientMap.delete(addr);
-        console.log('Unlink Address:', addr, 'Client Index:', index, '(IP pin kept until inactivity)');
+        console.log('Unlink Address:', addr, 'Client Index:', index, '(session IP pin cleared)');
       }
     }
   }
