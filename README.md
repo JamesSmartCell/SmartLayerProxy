@@ -80,9 +80,9 @@ Environment variables (or `application.properties` file):
   - `IP_PIN_MODE` — `off` | `log` (default) | `enforce`: after ESP login, pin the TCP session to the resolved client IP; see `docs/tcp-proxy-ip-address.md`
 
 - **Signed RPC proxy** (device chain reads via waterfall-rpc; see [docs/signed-rpc.md](docs/signed-rpc.md)):
-  - `RPC_SIGNER_PRIVATE_KEY` — dedicated EIP-191 signer (`.env` only; fail-closed if missing)
+  - `RPC_SIGNER_PRIVATE_KEY` — dedicated EIP-191 signer (`.env` only). Missing/invalid disables signed RPC only — server still boots (bridge/OTA/telemetry unaffected). Generate with `openssl rand -hex 32`, set as `0x<64 hex>` in the Pi’s gitignored `.env`, confirm via `GET /api/rpc/signer`.
   - `RPC_RATE_LIMIT_DEVICE_PER_MIN` / `RPC_RATE_LIMIT_IP_PER_MIN` — rate limits (defaults 30 / 60)
-  - `RPC_CATALOG_REFRESH_MS` — force Chainlist refresh (default 24h; library also refreshes weekly)
+  - `RPC_CATALOG_REFRESH_MS` — force Chainlist refresh (default 24h; only when signer configured; library also refreshes weekly)
 
 See `.env.example` for all available configuration options.
 

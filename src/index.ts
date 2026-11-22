@@ -12,8 +12,16 @@ const config = loadConfig();
 
 TelemetryService.getInstance(config.telemetryDbPath, config.telemetryRetentionDays);
 ZigbeeDiagnosticsService.getInstance(config.zigbeeDbPath, config.telemetryRetentionDays);
-// Load RPC signer (fail-closed if RPC_SIGNER_PRIVATE_KEY missing) + 24h catalog refresh.
-SignedRpcService.getInstance();
+// Signed RPC is optional: missing/invalid RPC_SIGNER_PRIVATE_KEY only disables
+// that feature (warn + reject rpcCall). Never block bridge / OTA / telemetry boot.
+try {
+  SignedRpcService.getInstance();
+} catch (err) {
+  console.warn(
+    '[SignedRpc] Initialization skipped; signed RPC disabled:',
+    err instanceof Error ? err.message : err
+  );
+}
 
 const app = express();
 const service = new ASyncService();

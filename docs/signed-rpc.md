@@ -12,10 +12,52 @@ EIP-191 matches the existing device login path (opcode `0x03`) and is cheap to v
 
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
-| `RPC_SIGNER_PRIVATE_KEY` | **Yes** for signed RPC | — | Hex private key (`0x` + 64 hex). **Gitignored `.env` only. Never logged.** Missing/invalid → fail-closed. |
+| `RPC_SIGNER_PRIVATE_KEY` | **Yes** for signed RPC | — | Hex private key (`0x` + 64 hex). **Gitignored `.env` only. Never logged.** Missing/invalid → feature disabled only (see below). |
 | `RPC_RATE_LIMIT_DEVICE_PER_MIN` | No | `30` | Per-device requests / rolling 60s |
 | `RPC_RATE_LIMIT_IP_PER_MIN` | No | `60` | Per-IP requests / rolling 60s |
-| `RPC_CATALOG_REFRESH_MS` | No | `86400000` (24h) | Forces `WaterfallRpc.resetProviders(24h)` |
+| `RPC_CATALOG_REFRESH_MS` | No | `86400000` (24h) | Forces `WaterfallRpc.resetProviders(24h)` (only when signer is configured) |
+
+### Missing key on first deploy (safe)
+
+`master` auto-deploys to the Pi. If `RPC_SIGNER_PRIVATE_KEY` is **absent or invalid**:
+
+1. The process **still starts** — UDP/TCP bridge, OTA, telemetry, passkeys, camera upload are unchanged.
+2. Startup logs **one warning**: `[SignedRpc] RPC_SIGNER_PRIVATE_KEY not set; signed RPC disabled (server continues)` (or the invalid-key variant).
+3. TCP `0x0B` / HTTP `POST /api/rpc/:chainId` reject with status `SIGNER_UNAVAILABLE` / HTTP `503`.
+4. `GET /api/rpc/signer` returns `503`.
+5. No waterfall catalog refresh timer is started until a valid key is present.
+
+### Generate the signer key and install on the Pi
+
+Use a **dedicated** key (not an admin wallet, not a device key). Never commit it.
+
+```bash
+# On a secure machine (not necessarily the Pi):
+openssl rand -hex 32
+# → e.g. a1b2c3… (64 hex chars)
+```
+
+Put it in the **gitignored** repo-root `.env` on the Raspberry Pi (same file as `TELEMETRY_API_KEY`, etc.):
+
+```bash
+# /path/to/SmartLayerProxy/.env  (permissions: chmod 600 .env)
+RPC_SIGNER_PRIVATE_KEY=0x<a1b2c3…64 hex chars>
+```
+
+Restart the proxy service after editing `.env`. Confirm:
+
+```bash
+curl -s https://<proxy-host>/api/rpc/signer
+# → { "address": "0x…", "allowedMethods": [...], ... }
+```
+
+Compile that `address` into Web3E firmware for verification. To derive the address offline without starting the proxy:
+
+```bash
+node -e "const {Wallet}=require('ethers'); console.log(new Wallet(process.env.RPC_SIGNER_PRIVATE_KEY).address)"
+```
+
+Rotate by generating a new key, updating `.env`, restarting, and shipping firmware with the new address.
 
 ### Waterfall RPC catalog refresh
 

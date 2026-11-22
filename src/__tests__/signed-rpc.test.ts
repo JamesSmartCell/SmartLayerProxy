@@ -114,7 +114,10 @@ describe('SignedRpcService', () => {
         nonceHex: '0x' + 'cd'.repeat(16),
       });
       expect(out.ok).toBe(false);
-      if (!out.ok) expect(out.status).toBe(RpcStatus.SIGNER_UNAVAILABLE);
+      if (!out.ok) {
+        expect(out.status).toBe(RpcStatus.SIGNER_UNAVAILABLE);
+        expect(out.error).toMatch(/not configured/i);
+      }
       expect(mockSender).not.toHaveBeenCalled();
     });
 
@@ -125,6 +128,89 @@ describe('SignedRpcService', () => {
         supportedChainIds: 'any',
       });
       expect(svc.isSignerConfigured()).toBe(false);
+    });
+
+    it('production getInstance() without env key does not throw and warns once', () => {
+      delete process.env.RPC_SIGNER_PRIVATE_KEY;
+      SignedRpcService.resetInstance();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      expect(() => SignedRpcService.getInstance({ disableCatalogRefresh: true })).not.toThrow();
+      const svc = SignedRpcService.getInstance();
+      expect(svc.isSignerConfigured()).toBe(false);
+      expect(
+        warn.mock.calls.some(
+          (c) =>
+            typeof c[0] === 'string' &&
+            c[0].includes('RPC_SIGNER_PRIVATE_KEY not set') &&
+            c[0].includes('server continues')
+        )
+      ).toBe(true);
+      warn.mockRestore();
+    });
+  });
+
+  describe('server boot without RPC_SIGNER_PRIVATE_KEY', () => {
+    it('boots Express + services without the key; bridge/telemetry still work; RPC disabled', async () => {
+      delete process.env.RPC_SIGNER_PRIVATE_KEY;
+      process.env.TELEMETRY_API_KEY = 'boot-test-key';
+      SignedRpcService.resetInstance();
+
+      // Mirror index.ts init order: telemetry → signed RPC (optional) → router.
+      expect(() => {
+        try {
+          SignedRpcService.getInstance({ disableCatalogRefresh: true });
+        } catch (err) {
+          // index.ts swallows this — must not prevent the rest of boot.
+          console.warn('[SignedRpc] Initialization skipped', err);
+        }
+      }).not.toThrow();
+
+      expect(SignedRpcService.getInstance().isSignerConfigured()).toBe(false);
+
+      const udp = {
+        getResponse: vi.fn(async () => 'ok-from-udp'),
+        checkServices: vi.fn(),
+      } as any;
+      const tcp = {
+        getResponse: vi.fn(async () => 'No device found'),
+        getConnectedDevices: vi.fn(() => []),
+        sendApiCallToDevice: vi.fn(),
+        trySendApiCallToDevice: vi.fn(() => false),
+      } as any;
+
+      const bootApp = express();
+      bootApp.use(express.json());
+      bootApp.use('/api', createRouter(udp, tcp));
+
+      // Existing admin challenge still works (not gated by RPC signer).
+      const challenge = await request(bootApp).get('/api/admin/challenge');
+      expect(challenge.status).toBe(200);
+      expect(challenge.body.nonce).toMatch(/^[a-f0-9]{64}$/);
+
+      // Telemetry still works with Bearer.
+      const sys = await request(bootApp)
+        .get('/api/telemetry/system')
+        .set('Authorization', 'Bearer boot-test-key');
+      expect(sys.status).toBe(200);
+      expect(sys.body).toHaveProperty('totalDevices');
+
+      // Signed RPC endpoints are disabled clearly, not crashing.
+      const signer = await request(bootApp).get('/api/rpc/signer');
+      expect(signer.status).toBe(503);
+      expect(signer.body.error).toMatch(/not configured/i);
+
+      const rpc = await request(bootApp)
+        .post('/api/rpc/1')
+        .set('Authorization', 'Bearer boot-test-key')
+        .send({
+          method: 'eth_chainId',
+          params: [],
+          device: '0x' + 'ab'.repeat(20),
+          nonce: '0x' + 'cd'.repeat(8),
+        });
+      expect(rpc.status).toBe(503);
+      expect(rpc.body.error).toMatch(/not configured/i);
+      expect(rpc.body.status).toBe(RpcStatus.SIGNER_UNAVAILABLE);
     });
   });
 

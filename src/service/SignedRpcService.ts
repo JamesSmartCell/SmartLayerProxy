@@ -246,17 +246,23 @@ export class SignedRpcService {
           this.wallet.address
         );
       } catch {
-        console.error('[SignedRpc] Invalid RPC_SIGNER_PRIVATE_KEY; signed RPC disabled');
+        // Invalid key must not crash the process — bridge/OTA/telemetry keep running.
+        console.warn(
+          '[SignedRpc] Invalid RPC_SIGNER_PRIVATE_KEY; signed RPC disabled (server continues)'
+        );
         this.wallet = null;
       }
     } else {
+      // Missing key is expected on first deploy before the Pi .env is updated.
       console.warn(
-        '[SignedRpc] RPC_SIGNER_PRIVATE_KEY not set; signed RPC fail-closed'
+        '[SignedRpc] RPC_SIGNER_PRIVATE_KEY not set; signed RPC disabled (server continues)'
       );
       this.wallet = null;
     }
 
-    if (!options.disableCatalogRefresh) {
+    // Only schedule catalog refresh when signed RPC is actually usable — avoids
+    // unnecessary waterfall network I/O when the feature is off.
+    if (this.wallet && !options.disableCatalogRefresh) {
       const interval =
         options.catalogRefreshMs ??
         parseInt(process.env.RPC_CATALOG_REFRESH_MS || String(24 * 60 * 60 * 1000), 10);
