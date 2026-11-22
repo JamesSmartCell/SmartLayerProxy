@@ -20,6 +20,11 @@ import { loadConfig } from '../config';
 import { FirmwareVersionParser } from '../service/FirmwareVersionParser';
 import { deriveHttpClientIpFromRequest, IpRateCounter } from '../util/ip';
 import type { GetChallengeFailReason } from '../service/TelemetryService';
+import {
+  SignedRpcService,
+  ALLOWED_RPC_METHODS,
+  normalizeAddress as normalizeRpcAddress,
+} from '../service/SignedRpcService';
 
 const CHECK_CONNECTION_INTERVAL_MS = 5 * 60 * 1000;
 /** In-memory getChallenge request counts per client IP (success + failure). */
@@ -1162,6 +1167,163 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
       res.json(record);
     } catch (err) {
       console.error(err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  // ========== Signed RPC proxy (must come before catch-all device routes) ==========
+  /**
+   * Public: signer address compiled into firmware for EIP-191 verification.
+   * Returns 503 when RPC_SIGNER_PRIVATE_KEY is not configured (fail-closed).
+   */
+  router.get('/rpc/signer', (_req, res) => {
+    try {
+      const rpc = SignedRpcService.getInstance();
+      const address = rpc.getSignerAddress();
+      if (!address) {
+        res.status(503).json({ error: 'RPC signer not configured' });
+        return;
+      }
+      res.json({
+        address,
+        allowedMethods: [...ALLOWED_RPC_METHODS],
+        messageVersion: 'SmartLayerProxy-RPC-v1',
+      });
+    } catch (err) {
+      console.error('[SignedRpc] signer endpoint error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  /**
+   * Diagnostics / testing: perform a signed read-only JSON-RPC call.
+   * Auth: Bearer TELEMETRY_API_KEY, or admin EIP-191 message `rpc:<chainId>:<nonce>`.
+   * Body: { method, params, device, nonce }
+   */
+  router.post('/rpc/:chainId', express.json({ limit: '64kb' }), async (req, res) => {
+    try {
+      const chainId = parseInt(req.params.chainId, 10);
+      if (!Number.isInteger(chainId) || chainId <= 0) {
+        res.status(400).json({ error: 'Invalid chainId' });
+        return;
+      }
+
+      const adminAddresses = getAdminAddresses();
+      const authHeader = req.get('Authorization');
+      const bearer =
+        authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+      const hasBearer =
+        Boolean(config.telemetryApiKey) &&
+        Boolean(bearer) &&
+        AdminAuthService.constantTimeCompare(bearer!, config.telemetryApiKey!);
+
+      let authorized = hasBearer;
+      if (!authorized) {
+        const { signature, message } = req.body || {};
+        if (signature && message && adminAddresses.length > 0) {
+          const nonceMatch = String(message).match(/:([a-f0-9]{64})$/);
+          if (nonceMatch) {
+            const nonce = nonceMatch[1];
+            const expected = `rpc:${chainId}:${nonce}`;
+            if (message === expected) {
+              const result = adminAuth.verifyAndBurnNonce(
+                nonce,
+                message,
+                signature,
+                adminAddresses
+              );
+              authorized = result.valid;
+              if (!result.valid) {
+                res.status(403).json({ error: result.error || 'Signature verification failed' });
+                return;
+              }
+            }
+          }
+        }
+      }
+
+      if (!authorized) {
+        if (!config.telemetryApiKey && adminAddresses.length === 0) {
+          res.status(503).json({ error: 'Signed RPC HTTP endpoint disabled (no auth configured)' });
+          return;
+        }
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      const { method, params, device, nonce } = req.body || {};
+      if (!method || typeof method !== 'string') {
+        res.status(400).json({ error: 'Missing method' });
+        return;
+      }
+      if (!device || typeof device !== 'string') {
+        res.status(400).json({ error: 'Missing device address' });
+        return;
+      }
+      if (!nonce || typeof nonce !== 'string') {
+        res.status(400).json({ error: 'Missing nonce (hex)' });
+        return;
+      }
+      const paramsArr = Array.isArray(params) ? params : [];
+      const clientIp = getClientIp(req);
+      const rpc = SignedRpcService.getInstance();
+      const outcome = await rpc.execute({
+        chainId,
+        method,
+        params: paramsArr,
+        deviceAddress: normalizeRpcAddress(device),
+        nonceHex: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+        ipAddress: clientIp,
+        tcpLimits: false,
+      });
+
+      telemetry.recordRpcCall({
+        address: normalizeRpcAddress(device),
+        chainId,
+        method,
+        success: outcome.ok,
+        durationMs: outcome.durationMs,
+        ipAddress: clientIp,
+        failureReason: outcome.ok ? undefined : outcome.error,
+        providerFallbacks: outcome.providerFallbacks,
+      });
+
+      if (!outcome.ok) {
+        const statusMap: Record<number, number> = {
+          1: 400,
+          2: 403,
+          3: 400,
+          4: 429,
+          5: 502,
+          6: 503,
+          7: 413,
+          8: 401,
+        };
+        res.status(statusMap[outcome.status] || 400).json({
+          error: outcome.error,
+          status: outcome.status,
+          durationMs: outcome.durationMs,
+        });
+        return;
+      }
+
+      res.json({
+        chainId: outcome.chainId,
+        method: outcome.method,
+        paramsHash: outcome.paramsHash,
+        result: outcome.result,
+        blockNumber: outcome.blockNumber,
+        timestamp: outcome.timestamp,
+        nonce: outcome.nonceHex,
+        device: outcome.deviceAddress,
+        message: outcome.message,
+        signature: outcome.signature,
+        signer: rpc.getSignerAddress(),
+        durationMs: outcome.durationMs,
+        providerFallbacks: outcome.providerFallbacks,
+      });
+    } catch (err) {
+      console.error('[SignedRpc] HTTP rpc error:', err);
       res.status(500).json({ error: 'Internal error' });
     }
   });

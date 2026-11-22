@@ -6,11 +6,14 @@ import { ASyncTCPService } from './service/ASyncTCPService';
 import { loadConfig } from './config';
 import { TelemetryService } from './service/TelemetryService';
 import { ZigbeeDiagnosticsService } from './service/ZigbeeDiagnosticsService';
+import { SignedRpcService } from './service/SignedRpcService';
 
 const config = loadConfig();
 
 TelemetryService.getInstance(config.telemetryDbPath, config.telemetryRetentionDays);
 ZigbeeDiagnosticsService.getInstance(config.zigbeeDbPath, config.telemetryRetentionDays);
+// Load RPC signer (fail-closed if RPC_SIGNER_PRIVATE_KEY missing) + 24h catalog refresh.
+SignedRpcService.getInstance();
 
 const app = express();
 const service = new ASyncService();

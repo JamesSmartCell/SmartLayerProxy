@@ -237,22 +237,41 @@ export class TCPClient {
         writeValue(chunks, param);
       }
       const msg = Buffer.concat(chunks);
-      this.socket.setNoDelay(true);
-
-      // Use cork/uncork so the entire message goes as one TCP segment - some IoT
-      // devices (e.g. ESP32 WiFiClient) can miss fragmented packets
-      this.socket.cork();
-      const flushed = this.socket.write(msg, (err) => {
-        if (err) console.error('TCP write error:', err);
-      });
-      process.nextTick(() => this.socket.uncork());
-
-      if (!flushed) {
-        console.warn('TCP write buffered (backpressure) - device may be slow to receive');
-      }
+      this.writePacket(msg);
       console.log('Create API call:', method, '| TCP TX', msg.length, 'bytes:', msg.toString('hex'));
     } catch (err) {
       console.error('TCP sendMessage error:', err);
+    }
+  }
+
+  /**
+   * Send a pre-built packet (e.g. opcode 0x0C signed RPC result).
+   * Does not set isWaitingForResponse — used for server-push replies to device-initiated ops.
+   */
+  sendRawPacket(packet: Buffer): void {
+    try {
+      if (packet.length > MAX_TCP_PACKET) {
+        console.error('TCP sendRawPacket exceeds MAX_TCP_PACKET:', packet.length);
+        return;
+      }
+      this.writePacket(packet);
+    } catch (err) {
+      console.error('TCP sendRawPacket error:', err);
+    }
+  }
+
+  private writePacket(msg: Buffer): void {
+    this.socket.setNoDelay(true);
+    // Use cork/uncork so the entire message goes as one TCP segment - some IoT
+    // devices (e.g. ESP32 WiFiClient) can miss fragmented packets
+    this.socket.cork();
+    const flushed = this.socket.write(msg, (err) => {
+      if (err) console.error('TCP write error:', err);
+    });
+    process.nextTick(() => this.socket.uncork());
+
+    if (!flushed) {
+      console.warn('TCP write buffered (backpressure) - device may be slow to receive');
     }
   }
 }

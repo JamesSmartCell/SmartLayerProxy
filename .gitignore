@@ -4,3 +4,4 @@ data/
 *.log
 .env
 tools/**/.env
+.rpcdata

@@ -21,6 +21,14 @@ import {
   resolveProxyProtocol,
   ProxyProtocolError,
 } from '../util/proxyProtocol';
+import {
+  SignedRpcService,
+  OPCODE_RPC_CALL,
+  parseRpcCallRequest,
+  encodeRpcResultPackets,
+  normalizeHex,
+  RpcStatus,
+} from './SignedRpcService';
 
 // ESP TcpBridge treats 5 minutes without a server packet as a dead session, and
 // it checks that *before* reading the inbound 0x06. Send keepalives sooner.
@@ -564,6 +572,29 @@ export class ASyncTCPService implements TCPCallback {
         }, client.getRemoteIp());
         return;
       }
+      case OPCODE_RPC_CALL: {
+        // Device-initiated signed chain read (authenticated sessions only).
+        if (!authed) {
+          console.log('Ignore rpcCall from unauthenticated #' + index);
+          return;
+        }
+        const parsed = parseRpcCallRequest(message);
+        if (!parsed) {
+          console.log('Malformed rpcCall #' + index, message.length, 'bytes');
+          const errPackets = encodeRpcResultPackets(0, {
+            ok: false,
+            status: RpcStatus.BAD_REQUEST,
+            error: 'Malformed rpcCall request',
+            durationMs: 0,
+            providerFallbacks: 0,
+          });
+          for (const pkt of errPackets) client.sendRawPacket(pkt);
+          return;
+        }
+        // Fire-and-forget async; response returns on opcode 0x0C.
+        void this.handleDeviceRpcCall(client, index, parsed);
+        return;
+      }
       case 0x04:
         return;
       case 0x05:
@@ -588,6 +619,84 @@ export class ASyncTCPService implements TCPCallback {
         return;
       default:
         this.dropUnauth(client, index, 'unknown opcode 0x' + opcode.toString(16));
+    }
+  }
+
+  /**
+   * Handle opcode 0x0B rpcCall from an authenticated device.
+   * Executes via SignedRpcService and replies with one or more 0x0C packets.
+   */
+  private async handleDeviceRpcCall(
+    client: TCPClient,
+    index: number,
+    parsed: {
+      requestId: number;
+      chainId: number;
+      method: string;
+      params: unknown[];
+      customNonce?: Buffer;
+    }
+  ): Promise<void> {
+    const addr = client.getAddress().toLowerCase();
+    const ip = client.getRemoteIp();
+    const challenge = client.getChallenge();
+    const nonceHex = parsed.customNonce?.length
+      ? normalizeHex('0x' + parsed.customNonce.toString('hex'))
+      : challenge.length
+        ? normalizeHex('0x' + challenge.toString('hex'))
+        : '';
+
+    console.log(
+      'rpcCall #' + index,
+      addr,
+      'chain',
+      parsed.chainId,
+      parsed.method,
+      'reqId',
+      parsed.requestId
+    );
+
+    let outcome;
+    try {
+      const rpc = SignedRpcService.getInstance();
+      outcome = await rpc.execute({
+        chainId: parsed.chainId,
+        method: parsed.method,
+        params: parsed.params,
+        deviceAddress: addr,
+        nonceHex,
+        ipAddress: ip,
+        tcpLimits: true,
+      });
+    } catch (err) {
+      outcome = {
+        ok: false as const,
+        status: RpcStatus.RPC_FAILED,
+        error: err instanceof Error ? err.message : 'rpcCall failed',
+        durationMs: 0,
+        providerFallbacks: 0,
+      };
+    }
+
+    this.telemetry.recordRpcCall({
+      address: addr,
+      chainId: parsed.chainId,
+      method: parsed.method,
+      success: outcome.ok,
+      durationMs: outcome.durationMs,
+      ipAddress: ip,
+      failureReason: outcome.ok ? undefined : outcome.error,
+      providerFallbacks: outcome.providerFallbacks,
+    });
+
+    // Client may have disconnected while awaiting RPC.
+    if (!this.clientIndexList.has(index) || !client.isAlive()) {
+      return;
+    }
+
+    const packets = encodeRpcResultPackets(parsed.requestId, outcome);
+    for (const pkt of packets) {
+      client.sendRawPacket(pkt);
     }
   }
 

@@ -19,7 +19,8 @@ export type TelemetryEventType =
   | 'firmware_revoke_completed'
   | 'firmware_revoke_cancelled'
   | 'get_challenge_failed'
-  | 'ip_pin_violation';
+  | 'ip_pin_violation'
+  | 'rpc_call';
 
 export type GetChallengeFailReason =
   | 'device_offline'
@@ -315,6 +316,55 @@ export class TelemetryService {
       VALUES (?, ?, 'api_call', ?, ?, ?, ?)
     `);
     stmt.run(now, normalized, method, success ? 1 : 0, responseTimeMs, ip || null);
+  }
+
+  /**
+   * Record a signed JSON-RPC proxy call (device TCP 0x0B or HTTP /api/rpc).
+   *
+   * Stored fields:
+   * - api_method: eth_* method name
+   * - api_success / api_response_time: outcome + duration
+   * - firmware_project: chainId as decimal string (reuses column; feed-compatible)
+   * - failure_reason: error message on failure, or `fallbacks=N` on success when N>0
+   * - requests_60s: provider fallbacks when available
+   */
+  recordRpcCall(options: {
+    address: string;
+    chainId: number;
+    method: string;
+    success: boolean;
+    durationMs: number;
+    ipAddress?: string;
+    failureReason?: string;
+    providerFallbacks?: number;
+  }): void {
+    const normalized = (options.address || 'unknown').toLowerCase();
+    const now = Date.now();
+    const sessionIp = this.activeSessions.get(normalized)?.ipAddress;
+    const ip = options.ipAddress || sessionIp;
+    const fallbacks = options.providerFallbacks ?? 0;
+    let failureReason = options.failureReason || null;
+    if (options.success && fallbacks > 0 && !failureReason) {
+      failureReason = `fallbacks=${fallbacks}`;
+    }
+
+    const stmt = this.db.prepare(`
+      INSERT INTO device_events (
+        timestamp, device, event_type, api_method, api_success, api_response_time,
+        ip_address, firmware_project, failure_reason, requests_60s
+      ) VALUES (?, ?, 'rpc_call', ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      now,
+      normalized,
+      options.method,
+      options.success ? 1 : 0,
+      options.durationMs,
+      ip || null,
+      String(options.chainId),
+      failureReason,
+      fallbacks > 0 ? fallbacks : null
+    );
   }
 
   recordFirmwareNotify(

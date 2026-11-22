@@ -79,6 +79,11 @@ Environment variables (or `application.properties` file):
   - `TRUST_PROXY` — legacy: trust XFF from any peer
   - `IP_PIN_MODE` — `off` | `log` (default) | `enforce`: after ESP login, pin the TCP session to the resolved client IP; see `docs/tcp-proxy-ip-address.md`
 
+- **Signed RPC proxy** (device chain reads via waterfall-rpc; see [docs/signed-rpc.md](docs/signed-rpc.md)):
+  - `RPC_SIGNER_PRIVATE_KEY` — dedicated EIP-191 signer (`.env` only; fail-closed if missing)
+  - `RPC_RATE_LIMIT_DEVICE_PER_MIN` / `RPC_RATE_LIMIT_IP_PER_MIN` — rate limits (defaults 30 / 60)
+  - `RPC_CATALOG_REFRESH_MS` — force Chainlist refresh (default 24h; library also refreshes weekly)
+
 See `.env.example` for all available configuration options.
 
 ## API Endpoints
@@ -100,6 +105,10 @@ Admin-protected operations require a signed challenge. The flow:
 3. Submit signature with request (nonce is single-use and burned after verification)
 
 See [docs/firmware-ota.md](docs/firmware-ota.md) for OTA notify, setup firmware, and **device revocation** (notice format for firmware agents).
+
+### Signed RPC (read-only chain calls)
+
+Authenticated TCP devices can request opcode `0x0B` `rpcCall`; the proxy executes via `@smarttokenlabs/waterfall-rpc` and returns a chunked `0x0C` result signed with EIP-191. HTTP diagnostics: `GET /api/rpc/signer`, `POST /api/rpc/:chainId` (Bearer or admin `rpc:<chainId>:<nonce>`). Wire format and verification: [docs/signed-rpc.md](docs/signed-rpc.md).
 
 ### Zigbee Gateway Diagnostics
 

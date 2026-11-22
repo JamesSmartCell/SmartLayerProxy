@@ -51,7 +51,8 @@ interface Event {
     | 'firmware_revoke_completed'
     | 'firmware_revoke_cancelled'
     | 'get_challenge_failed'
-    | 'ip_pin_violation';
+    | 'ip_pin_violation'
+    | 'rpc_call';
   protocol?: 'UDP' | 'TCP';
   disconnectReason?: string;
   apiMethod?: string;
@@ -453,6 +454,63 @@ function summarizeIpPinViolations(events: Event[]): string {
   return md;
 }
 
+function summarizeSignedRpc(events: Event[]): string {
+  const rpcEvents = events.filter(e => e.eventType === 'rpc_call');
+  if (rpcEvents.length === 0) {
+    return '';
+  }
+
+  let md = '## Signed RPC\n\n';
+  const failures = rpcEvents.filter(e => !e.apiSuccess);
+  const successes = rpcEvents.filter(e => e.apiSuccess);
+  md += `Total \`rpc_call\` events: ${rpcEvents.length} (${successes.length} ok, ${failures.length} failed)\n\n`;
+
+  const byMethod = new Map<string, { ok: number; fail: number; totalMs: number }>();
+  const byChain = new Map<string, number>();
+  const failByIp = new Map<string, number>();
+
+  for (const ev of rpcEvents) {
+    const method = ev.apiMethod || 'unknown';
+    const entry = byMethod.get(method) || { ok: 0, fail: 0, totalMs: 0 };
+    if (ev.apiSuccess) entry.ok++;
+    else entry.fail++;
+    entry.totalMs += ev.apiResponseTime || 0;
+    byMethod.set(method, entry);
+
+    const chain = ev.firmwareProject || 'unknown';
+    byChain.set(chain, (byChain.get(chain) || 0) + 1);
+
+    if (!ev.apiSuccess) {
+      const ip = ev.ipAddress || 'unknown';
+      failByIp.set(ip, (failByIp.get(ip) || 0) + 1);
+    }
+  }
+
+  md += '**By method:**\n\n';
+  for (const [method, stats] of Array.from(byMethod.entries()).sort((a, b) => (b[1].ok + b[1].fail) - (a[1].ok + a[1].fail))) {
+    const n = stats.ok + stats.fail;
+    const avg = n > 0 ? Math.round(stats.totalMs / n) : 0;
+    md += `- \`${method}\`: ${n} (fail=${stats.fail}, avg=${avg}ms)\n`;
+  }
+  md += '\n';
+
+  md += '**By chainId:**\n\n';
+  for (const [chain, count] of Array.from(byChain.entries()).sort((a, b) => b[1] - a[1])) {
+    md += `- \`${chain}\`: ${count}\n`;
+  }
+  md += '\n';
+
+  if (failures.length > 0) {
+    md += '**Top failure IPs:**\n\n';
+    for (const [ip, count] of Array.from(failByIp.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10)) {
+      md += `- \`${ip}\`: ${count}\n`;
+    }
+    md += '\n';
+  }
+
+  return md;
+}
+
 function generateMarkdownReport(
   analyses: Map<string, DeviceAnalysis>,
   silentDevices?: SilentDeviceAnalysis[],
@@ -474,6 +532,9 @@ function generateMarkdownReport(
     md += `- getChallenge failures: ${gcf}\n`;
     const ipv = allEvents.filter(e => e.eventType === 'ip_pin_violation').length;
     md += `- IP pin violations: ${ipv}\n`;
+    const rpc = allEvents.filter(e => e.eventType === 'rpc_call').length;
+    const rpcFail = allEvents.filter(e => e.eventType === 'rpc_call' && !e.apiSuccess).length;
+    md += `- Signed RPC calls: ${rpc} (failures: ${rpcFail})\n`;
   }
   if (silentDevices) {
     md += `- Silent devices (expected but not connecting): ${silentDevices.filter(d => !d.device.retired).length}\n`;
@@ -483,6 +544,7 @@ function generateMarkdownReport(
   if (allEvents) {
     md += summarizeGetChallengeFailures(allEvents);
     md += summarizeIpPinViolations(allEvents);
+    md += summarizeSignedRpc(allEvents);
   }
 
   if (silentDevices && silentDevices.length > 0) {
