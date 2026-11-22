@@ -68,7 +68,7 @@ export class TCPClient {
     return this.pinnedIp;
   }
 
-  /** Log fragment: `#0 ip=144.6.2.81 (peer ::1)` */
+  /** Log fragment: `#0 ip=144.6.2.81` */
   formatIpLog(): string {
     return formatConnectionIpLog(this.clientIndex, this.getRemoteIp(), this.getPeerIp());
   }

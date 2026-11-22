@@ -185,22 +185,26 @@ describe('session pin lifecycle (re-pin on new login)', () => {
 });
 
 describe('formatConnectionIpLog', () => {
-  it('shows resolved IP with peer when they differ (PROXY path)', () => {
-    expect(formatConnectionIpLog(0, '144.6.2.81', '::1')).toBe(
-      '#0 ip=144.6.2.81 (peer ::1)'
-    );
+  it('shows resolved IP only (no peer parenthetical)', () => {
+    expect(formatConnectionIpLog(0, '144.6.2.81', '::1')).toBe('#0 ip=144.6.2.81');
     expect(formatConnectionIpLog(3, '203.0.113.1', '127.0.0.1')).toBe(
-      '#3 ip=203.0.113.1 (peer 127.0.0.1)'
+      '#3 ip=203.0.113.1'
     );
   });
 
-  it('omits peer parenthetical when resolved equals peer', () => {
+  it('prints resolved IP when it equals peer', () => {
     expect(formatConnectionIpLog(1, '10.0.0.5', '10.0.0.5')).toBe('#1 ip=10.0.0.5');
     expect(formatConnectionIpLog(2, '10.0.0.5')).toBe('#2 ip=10.0.0.5');
   });
 
-  it('handles missing resolved IP', () => {
-    expect(formatConnectionIpLog(0, '', '::1')).toBe('#0 ip=? (peer ::1)');
+  it('falls back to socket peer when resolved IP is missing', () => {
+    expect(formatConnectionIpLog(0, '', '::1')).toBe('#0 ip=::1');
+    expect(formatConnectionIpLog(1, '', '127.0.0.1')).toBe('#1 ip=127.0.0.1');
+  });
+
+  it('uses ? only when both resolved and peer are missing', () => {
+    expect(formatConnectionIpLog(0, '', '')).toBe('#0 ip=?');
+    expect(formatConnectionIpLog(2, undefined)).toBe('#2 ip=?');
   });
 });
 

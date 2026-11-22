@@ -55,7 +55,7 @@ IP_PIN_MODE=log
 
 Default is **`log`**: PROXY rollout may still have mixed legacy peers, so enforce is safer after you confirm real IPs in journals/telemetry.
 
-Handshake / command journal lines include the resolved IP, e.g. `Receive Command: 01b1a692 #0 ip=144.6.2.81 (peer ::1)`.
+Handshake / command journal lines include the resolved IP, e.g. `Receive Command: 01b1a692 #0 ip=144.6.2.81`.
 
 ## Telemetry IP population
 

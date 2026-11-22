@@ -96,18 +96,15 @@ export function resolvePinOnLogin(
 }
 
 /**
- * Handshake / command log suffix: `#0 ip=144.6.2.81 (peer ::1)`
- * When resolved IP equals peer (no PROXY), omit the peer parenthetical.
+ * Handshake / command log suffix: `#0 ip=144.6.2.81`
+ * Uses the resolved client IP when known; otherwise the socket peer so lines
+ * never omit an IP.
  */
 export function formatConnectionIpLog(
   index: number,
   resolvedIp: string | undefined | null,
   peerIp?: string | undefined | null
 ): string {
-  const resolved = normalizeIp(resolvedIp) || '?';
-  const peer = normalizeIp(peerIp);
-  if (peer && peer !== resolved) {
-    return `#${index} ip=${resolved} (peer ${peer})`;
-  }
-  return `#${index} ip=${resolved}`;
+  const ip = normalizeIp(resolvedIp) || normalizeIp(peerIp) || '?';
+  return `#${index} ip=${ip}`;
 }
