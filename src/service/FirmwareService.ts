@@ -314,6 +314,7 @@ export class FirmwareService {
         uploadedBy,
         isCurrent: markCurrent,
         channel: 'setup' as FirmwareChannel,
+        autoNotify: false, // Setup firmware doesn't use auto-notify
       };
     })();
 
