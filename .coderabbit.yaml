@@ -1,0 +1,215 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+# CodeRabbit configuration for SmartLayerProxy
+# IoT proxy with Ethereum authentication, firmware OTA, and telemetry tracking
+
+language: en-AU
+enable_free_tier: true
+
+reviews:
+  # Assertive profile: security-critical codebase (crypto/signature verification,
+  # firmware OTA, admin auth) with strict TypeScript and comprehensive tests.
+  # Assertive feedback helps catch security issues and maintain high standards.
+  profile: assertive
+  
+  request_changes_workflow: false
+  high_level_summary: true
+  
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - master
+
+  # Exclude build output, dependencies, generated files, and binaries
+  path_filters:
+    - "!dist/**"
+    - "!node_modules/**"
+    - "!coverage/**"
+    - "!data/**"
+    - "!*.bin"
+    - "!package-lock.json"
+    - "!pnpm-lock.yaml"
+
+  # Path-specific review instructions aligned with codebase conventions
+  path_instructions:
+    - path: "src/crypto/**"
+      instructions: |
+        Security-critical cryptographic code. Verify:
+        - Ethereum signature verification uses ethers.js correctly
+        - EIP-191 message hashing follows standard (MESSAGE_PREFIX + length + message)
+        - No timing attacks in comparison operations
+        - Error paths don't leak signature/key material
+        - Recovery logic handles malformed signatures safely (early length checks)
+
+    - path: "src/service/AdminAuthService.ts"
+      instructions: |
+        Admin authentication service. Verify:
+        - Nonce generation uses crypto.randomBytes (cryptographically secure)
+        - Nonces are single-use and burned after verification
+        - Constant-time comparison (timingSafeEqual) for bearer tokens
+        - Nonce expiry (60s TTL) is enforced before signature verification
+        - Admin address comparison is case-insensitive (normalized to lowercase)
+        - Nonce cleanup timer is properly managed (stop on instance reset)
+
+    - path: "src/service/FirmwareService.ts"
+      instructions: |
+        Firmware OTA coordinator. Verify:
+        - Semver comparison is correct (parse MAJOR.MINOR.PATCH, compare numerically)
+        - Only devices with matching project are notified
+        - Legacy firmware (non-standard version format) is never auto-notified
+        - R2 upload verifies SHA256 matches signed message
+        - Firmware URLs use public R2 endpoint (or log warning)
+        - Device revoke notices include admin signature + setup firmware SHA256
+        - Per-project R2 bucket overrides resolve correctly (env suffix logic)
+
+    - path: "src/service/FirmwareVersionParser.ts"
+      instructions: |
+        Version parsing logic. Verify:
+        - Format: `<project>@<semver>+<hash>` is correctly extracted
+        - Semver must be MAJOR.MINOR.PATCH (three numbers)
+        - Handles legacy formats gracefully (return null, don't throw)
+        - Project name allows alphanumeric, hyphens, underscores
+        - Comparison logic is transitive and consistent
+
+    - path: "src/service/TelemetryService.ts"
+      instructions: |
+        Telemetry tracking with SQLite. Verify:
+        - Device addresses stored as lowercase (consistent indexing)
+        - Never log full device addresses or IP addresses in error messages
+        - Database migrations are backward-compatible with default values
+        - Retention policy runs safely (incremental vacuum after >1000 deletes)
+        - API key auth is enforced (constant-time comparison)
+        - Ack dry-run mode is respected when TELEMETRY_ACK_ENABLED=false
+
+    - path: "src/service/ZigbeeDiagnosticsService.ts"
+      instructions: |
+        Zigbee gateway diagnostics. Verify:
+        - X-ZBGW-Diag token comparison uses constant-time (AdminAuthService.constantTimeCompare)
+        - Device MAC addresses are stored lowercase
+        - Schema migrations handle new columns with defaults
+        - Command queue delivers once and marks delivered
+        - Payload size limit (64KB) is enforced before parsing
+        - Never log ZBGW_DIAG_TOKENS in error messages
+
+    - path: "src/api/**"
+      instructions: |
+        Express HTTP API routes. Verify:
+        - Admin-protected endpoints verify signature + burn nonce
+        - Bearer token auth uses constant-time comparison
+        - Input validation on query params (limit capped to max, semver format)
+        - Never log secrets (API keys, signatures, private keys)
+        - Error responses don't leak internal paths or stack traces
+        - Firmware upload enforces max size (FIRMWARE_UPLOAD_MAX_SIZE_MB)
+
+    - path: "src/config.ts"
+      instructions: |
+        Configuration loader. Verify:
+        - Sensitive values (API keys, R2 secrets, admin keys) never logged
+        - Per-project env suffix logic (non-alphanumeric → underscore, uppercase)
+        - Fallback chain: per-project override → global → default
+        - Address lists are split correctly (comma-separated, trimmed, lowercase)
+        - IP_PIN_MODE parsing accepts: off | log | enforce
+
+    - path: "tools/firmware/**"
+      instructions: |
+        CLI firmware upload tools. Verify:
+        - Admin signature flow: get nonce → sign message → upload
+        - Never log FIRMWARE_ADMIN_KEY or private key material
+        - Version format validation: plain semver only (not v1.2.3 or project@1.2.3)
+        - SHA256 computed correctly before signing
+        - .env file read from tools/<tool-dir>/.env or repo root
+        - Error messages don't leak key material or signatures
+
+    - path: "tools/telemetry/**"
+      instructions: |
+        CLI telemetry tools (pull/analyse). Verify:
+        - Ack signature uses TELEMETRY_ADMIN_KEY (not FIRMWARE_ADMIN_KEY)
+        - Attribution analysis: proxy vs Web3E TcpBridge/UdpBridge vs device firmware
+        - Reconnect storm detection: threshold and time window analysis
+        - Never log API keys or admin private keys
+        - Dry-run mode is explicit (--dry-run flag)
+
+    - path: "src/util/ipPin.ts"
+      instructions: |
+        Session IP pinning logic. Verify:
+        - Loopback IPs (127.0.0.1, ::1) are never pinned (tunnel scenario)
+        - Unknown/unresolved IPs are never pinned
+        - Enforce mode terminates session on mismatch
+        - Log mode emits telemetry event (ip_pin_violation) but allows traffic
+        - IP comparison is exact (no CIDR matching)
+
+    - path: "src/util/proxyProtocol.ts"
+      instructions: |
+        PROXY protocol parser. Verify:
+        - Trusted peer check is explicit (PROXY_PROTOCOL_TRUSTED list)
+        - Untrusted action: ignore (treat as app data) or reject (close connection)
+        - Parsing validates format before extracting IP
+        - IPv6 addresses handled correctly (normalize, brackets)
+        - X-Forwarded-For fallback when PROXY header absent
+
+    - path: "src/__tests__/**"
+      instructions: |
+        Vitest unit tests. Verify:
+        - New API endpoints have test coverage
+        - Security features have negative tests (invalid sig, expired nonce, wrong admin)
+        - Database migrations tested (schema change + data migration)
+        - Test isolation: single fork mode (fileParallelism: false, singleFork: true)
+        - Mock external services (R2, HTTP clients) to avoid network calls
+
+    - path: ".env.example"
+      instructions: |
+        Environment variable documentation. Verify:
+        - Sensitive values are placeholders (never commit real secrets)
+        - Comments document required vs optional variables
+        - Format examples are correct (comma-separated addresses, URLs)
+        - Security advice: "openssl rand -base64 32" for API keys
+        - Per-project override syntax is documented (env suffix logic)
+
+    - path: ".github/workflows/**"
+      instructions: |
+        GitHub Actions CI/CD. Verify:
+        - Secrets are passed as env vars (not in command args)
+        - Multi-version Node.js matrix (20.x, 22.x)
+        - Build → typecheck → test order
+        - npm ci (not npm install) for reproducible builds
+        - npm audit runs but continues on error (non-blocking)
+
+    - path: "docs/**"
+      instructions: |
+        Technical documentation. Verify:
+        - Security flows are correct (nonce → sign → verify → burn)
+        - API examples use placeholders for secrets
+        - Firmware OTA flow matches implementation (updateReady → GET /latest → download → verify SHA256)
+        - Revoke notice format matches wire protocol (purpose=revoke, signature binding)
+        - Semver comparison rules are explained clearly
+
+  # Linting and security tools
+  tools:
+    # Enable secret scanning (critical for this security-sensitive project)
+    gitleaks:
+      enabled: true
+
+    # Enable Markdown linting (documentation is important)
+    markdownlint:
+      enabled: true
+
+    # Enable GitHub Actions workflow linting
+    actionlint:
+      enabled: true
+
+    # Enable YAML linting (GitHub workflows, this config file)
+    yamllint:
+      enabled: true
+
+    # Enable GitHub Checks integration
+    github-checks:
+      enabled: true
+
+    # Disable ESLint (no .eslintrc config detected; would use defaults that may not match style)
+    eslint:
+      enabled: false
+
+    # Disable ShellCheck (no shell scripts in the repo)
+    shellcheck:
+      enabled: false
