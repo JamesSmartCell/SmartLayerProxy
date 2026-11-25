@@ -1020,7 +1020,11 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         return;
       }
 
-      // Record metadata
+      // Auto-notify is enabled by default; opt out with autoNotify=false
+      const autoNotifyParam = req.query.autoNotify as string | undefined;
+      const autoNotify = autoNotifyParam !== 'false';
+
+      // Record metadata with autoNotify flag
       const metadata = firmware.addFirmware(
         project,
         version,
@@ -1029,15 +1033,13 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         r2Key,
         url,
         authResult.address,
-        true
+        true,
+        autoNotify
       );
 
-      // Auto-notify is enabled by default; opt out with autoNotify=false
-      const autoNotifyParam = req.query.autoNotify as string | undefined;
-      const shouldNotify = autoNotifyParam !== 'false';
       let notifyResult;
       
-      if (shouldNotify) {
+      if (autoNotify) {
         try {
           const connectedDevices = tcpService.getConnectedDevices();
           const notified: Array<{ address: string; oldVersion: string; newVersion: string }> = [];
@@ -1099,9 +1101,8 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
           }
           notifyResult = { notified: notified.length, devices: notified, skipped };
           
-          if (notified.length > 0) {
-            console.log(`[Firmware] Upload ${project} ${version}: notified ${notified.length} device(s), skipped ${skipped.length}`);
-          }
+          // Always log upload summary (including when no devices were notified)
+          console.log(`[Firmware] Upload ${project} ${version}: notified ${notified.length} device(s), skipped ${skipped.length}`);
         } catch (err) {
           console.error('[Firmware] Auto-notify error:', err);
         }
