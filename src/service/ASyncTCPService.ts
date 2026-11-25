@@ -108,6 +108,15 @@ function sanitizeFirmwareVersion(version: string): string {
   return version.replace(/[^\x20-\x7E]/g, '?');
 }
 
+/** Track firmware update notification attempts per device+version to prevent OTA storms */
+interface UpdateNotifyAttempt {
+  lastNotifyTime: number;
+  attemptCount: number;
+}
+
+const MAX_UPDATE_NOTIFY_ATTEMPTS = 3;
+const UPDATE_NOTIFY_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
+
 export class ASyncTCPService implements TCPCallback {
   private clientMap = new Map<string, number>();
   private clientIndexList = new Map<number, TCPClient>();
@@ -120,6 +129,9 @@ export class ASyncTCPService implements TCPCallback {
   private tokenToAddress = new Map<string, string>();
   private telemetry = TelemetryService.getInstance();
   private ipPinMode: IpPinMode;
+
+  /** In-memory tracking of update notification attempts (device+version -> attempt info) */
+  private updateNotifyAttempts = new Map<string, UpdateNotifyAttempt>();
 
   constructor() {
     this.ipPinMode = loadConfig().ipPinMode;
@@ -515,9 +527,14 @@ export class ASyncTCPService implements TCPCallback {
           );
           this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip, firmwareVersion);
           // Deliver queued revoke notices / detect setup-firmware reappearance after auth.
+          // Then check for available firmware updates (after revoke check).
           // Defer so the auth response path is not blocked by the outbound API call.
           setImmediate(() => {
-            void this.handlePostLoginRevoke(addrLower, firmwareVersion);
+            const revokeHandled = this.handlePostLoginRevoke(addrLower, firmwareVersion);
+            // Only check for updates if no revoke was queued/delivered
+            if (!revokeHandled) {
+              void this.checkAndNotifyFirmwareUpdate(addrLower, firmwareVersion);
+            }
           });
           return;
         }
@@ -814,7 +831,17 @@ export class ASyncTCPService implements TCPCallback {
     console.log('Revoke acknowledged by device', active.device, 'project', active.project);
   }
 
-  private handlePostLoginRevoke(deviceAddress: string, firmwareVersion?: string): void {
+  /**
+   * Check if a newly-connected device has an available firmware update.
+   * Only notifies if:
+   * - Device is on an older version than current release
+   * - Current release has autoNotify enabled
+   * - Device hasn't exceeded notification attempt limit
+   * - Cooldown period has passed since last attempt
+   */
+  private async checkAndNotifyFirmwareUpdate(deviceAddress: string, firmwareVersion?: string): Promise<void> {
+    if (!firmwareVersion) return;
+
     let firmware: FirmwareService;
     try {
       firmware = FirmwareService.getInstance();
@@ -822,9 +849,91 @@ export class ASyncTCPService implements TCPCallback {
       return;
     }
 
+    const parsed = FirmwareVersionParser.parse(firmwareVersion);
+    if (!parsed) {
+      return;
+    }
+
+    // Don't notify devices on setup firmware
+    if (parsed.project.endsWith('-setup')) {
+      return;
+    }
+
+    const latest = firmware.getLatestFirmware(parsed.project);
+    if (!latest) {
+      return;
+    }
+
+    // Only notify if the latest release has autoNotify enabled
+    if (!latest.autoNotify) {
+      return;
+    }
+
+    const isOlder = FirmwareVersionParser.isOlder(parsed.semver, latest.version);
+    if (isOlder !== true) {
+      return;
+    }
+
+    // Check notification attempt limits (device + target version)
+    const attemptKey = `${deviceAddress.toLowerCase()}:${latest.version}`;
+    const now = Date.now();
+    const attempt = this.updateNotifyAttempts.get(attemptKey);
+
+    if (attempt) {
+      // Check if max attempts reached
+      if (attempt.attemptCount >= MAX_UPDATE_NOTIFY_ATTEMPTS) {
+        console.log(
+          `[Firmware] Update notify limit reached for ${deviceAddress}: ${parsed.semver} -> ${latest.version} (${attempt.attemptCount} attempts)`
+        );
+        return;
+      }
+
+      // Check cooldown period
+      const timeSinceLastNotify = now - attempt.lastNotifyTime;
+      if (timeSinceLastNotify < UPDATE_NOTIFY_COOLDOWN_MS) {
+        const remainingMs = UPDATE_NOTIFY_COOLDOWN_MS - timeSinceLastNotify;
+        const remainingMin = Math.ceil(remainingMs / 60000);
+        console.log(
+          `[Firmware] Update notify cooldown for ${deviceAddress}: ${parsed.semver} -> ${latest.version} (${remainingMin}min remaining)`
+        );
+        return;
+      }
+    }
+
+    // Send notification
+    try {
+      await this.sendApiCallToDevice(deviceAddress, 'updateReady', {});
+      
+      // Track this attempt
+      this.updateNotifyAttempts.set(attemptKey, {
+        lastNotifyTime: now,
+        attemptCount: (attempt?.attemptCount || 0) + 1,
+      });
+
+      this.telemetry.recordFirmwareNotify(deviceAddress, parsed.project, latest.version);
+      console.log(
+        `[Firmware] Notified ${deviceAddress} on login: ${parsed.semver} -> ${latest.version} (attempt ${(attempt?.attemptCount || 0) + 1}/${MAX_UPDATE_NOTIFY_ATTEMPTS})`
+      );
+    } catch (err) {
+      console.error(`[Firmware] Failed to notify ${deviceAddress} on login:`, err);
+    }
+  }
+
+  /**
+   * Handle post-login revoke check.
+   * Returns true if a revoke was queued or delivered (indicating update check should be skipped).
+   */
+  private handlePostLoginRevoke(deviceAddress: string, firmwareVersion?: string): boolean {
+    let firmware: FirmwareService;
+    try {
+      firmware = FirmwareService.getInstance();
+    } catch {
+      return false;
+    }
+
     const device = normalizeDeviceAddress(deviceAddress);
     const active = firmware.getActiveRevoke(device);
-    if (!active) return;
+    if (!active) return false;
 
     const parsed = firmwareVersion ? FirmwareVersionParser.parse(firmwareVersion) : null;
 
@@ -851,13 +960,17 @@ export class ASyncTCPService implements TCPCallback {
         device,
         firmwareVersion || '(no version)'
       );
-      return;
+      return true; // Revoke was completed
     }
 
     // Still on app firmware with a pending revoke: deliver now.
     if (active.status === 'pending') {
       this.deliverPendingRevoke(device);
+      return true; // Revoke was queued/delivered
     }
+
+    // Revoke is active (delivered or acknowledged), don't notify for update
+    return true;
   }
 
   getLoginChallenge(remoteAddr: string): string {

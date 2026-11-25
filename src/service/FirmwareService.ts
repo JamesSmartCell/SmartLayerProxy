@@ -21,6 +21,7 @@ export interface FirmwareMetadata {
   uploadedBy?: string;
   isCurrent: boolean;
   channel: FirmwareChannel;
+  autoNotify: boolean;
 }
 
 export interface FirmwareVersion {
@@ -30,6 +31,7 @@ export interface FirmwareVersion {
   sha256: string;
   size: number;
   channel?: FirmwareChannel;
+  autoNotify?: boolean;
 }
 
 export type RevokeStatus =
@@ -130,6 +132,7 @@ export class FirmwareService {
         uploaded_at INTEGER NOT NULL,
         uploaded_by TEXT,
         is_current INTEGER NOT NULL DEFAULT 0,
+        auto_notify INTEGER NOT NULL DEFAULT 0,
         UNIQUE(project, version)
       );
 
@@ -179,6 +182,17 @@ export class FirmwareService {
     `);
 
     this.migrateRevokeSchema();
+    this.migrateFirmwareSchema();
+  }
+
+  private migrateFirmwareSchema(): void {
+    const columns = this.db.prepare('PRAGMA table_info(firmware)').all() as Array<{ name: string }>;
+    const names = new Set(columns.map(c => c.name));
+    if (!names.has('auto_notify')) {
+      // Existing releases default to false (no auto-notify) to avoid OTA storm on deploy
+      this.db.exec('ALTER TABLE firmware ADD COLUMN auto_notify INTEGER NOT NULL DEFAULT 0');
+      console.log('[Firmware] Migrated schema: added auto_notify column (existing releases default to false)');
+    }
   }
 
   private migrateRevokeSchema(): void {
@@ -206,7 +220,8 @@ export class FirmwareService {
     r2Key: string,
     url: string,
     uploadedBy?: string,
-    markCurrent = true
+    markCurrent = true,
+    autoNotify = false
   ): FirmwareMetadata {
     const uploadedAt = Date.now();
 
@@ -219,8 +234,8 @@ export class FirmwareService {
       }
 
       const insertStmt = this.db.prepare(`
-        INSERT INTO firmware (project, version, sha256, size, r2_key, url, uploaded_at, uploaded_by, is_current)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO firmware (project, version, sha256, size, r2_key, url, uploaded_at, uploaded_by, is_current, auto_notify)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const info = insertStmt.run(
@@ -232,7 +247,8 @@ export class FirmwareService {
         url,
         uploadedAt,
         uploadedBy || null,
-        markCurrent ? 1 : 0
+        markCurrent ? 1 : 0,
+        autoNotify ? 1 : 0
       );
 
       return {
@@ -247,6 +263,7 @@ export class FirmwareService {
         uploadedBy,
         isCurrent: markCurrent,
         channel: 'app' as FirmwareChannel,
+        autoNotify,
       };
     })();
 
@@ -297,6 +314,7 @@ export class FirmwareService {
         uploadedBy,
         isCurrent: markCurrent,
         channel: 'setup' as FirmwareChannel,
+        autoNotify: false, // Setup firmware doesn't use auto-notify
       };
     })();
 
@@ -305,7 +323,7 @@ export class FirmwareService {
 
   getLatestFirmware(project: string): FirmwareVersion | null {
     const stmt = this.db.prepare(`
-      SELECT project, version, url, sha256, size
+      SELECT project, version, url, sha256, size, auto_notify as autoNotify
       FROM firmware
       WHERE project = ? AND is_current = 1
       LIMIT 1
@@ -321,6 +339,7 @@ export class FirmwareService {
       sha256: row.sha256,
       size: row.size,
       channel: 'app',
+      autoNotify: !!row.autoNotify,
     };
   }
 

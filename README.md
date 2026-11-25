@@ -439,12 +439,15 @@ npm run telemetry:all                         # SmartLayer pull+analyse, then Zi
 **Upload firmware binary with admin signature:**
 
 ```bash
-# Using npm scripts (recommended)
-npm run firmware:upload GarageDoor 1.2.3 firmware.bin
-npm run firmware:upload zigbee-gateway 1.2.3 firmware.bin
+# Using npm scripts (recommended) - note the -- before arguments
+npm run firmware:upload -- garagedoor 1.2.3 firmware.bin
+npm run firmware:upload -- zigbee-gateway 1.2.3 firmware.bin
+
+# Disable auto-notification for staged rollouts
+npm run firmware:upload -- garagedoor 1.2.3 firmware.bin --no-notify
 
 # Or using ts-node directly
-ts-node tools/firmware/upload.ts <project> <version> <firmware.bin>
+ts-node tools/firmware/upload.ts <project> <version> <firmware.bin> [--no-notify]
 ```
 
 Required `.env` variables:
@@ -452,6 +455,12 @@ Required `.env` variables:
 - `FIRMWARE_ADMIN_KEY` - Private key for signing admin operations
 
 The tool computes SHA256, gets challenge nonce, signs `firmware:<project>:<version>:<sha256>:<nonce>`, and uploads to proxy.
+
+**Auto-notification behavior:**
+- By default, all currently connected devices with older versions are automatically notified after upload
+- Devices that connect later with older versions are also notified on login
+- Use `--no-notify` flag to skip auto-notification for staged rollouts
+- The manual admin notify endpoint (`POST /api/firmware/:project/notify`) remains available for manual control
 
 ## Resource Usage
 
