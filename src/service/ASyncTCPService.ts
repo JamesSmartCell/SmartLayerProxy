@@ -515,9 +515,11 @@ export class ASyncTCPService implements TCPCallback {
           );
           this.telemetry.recordDeviceConnection(addrLower, 'TCP', ip, firmwareVersion);
           // Deliver queued revoke notices / detect setup-firmware reappearance after auth.
+          // Also check for available firmware updates.
           // Defer so the auth response path is not blocked by the outbound API call.
           setImmediate(() => {
             void this.handlePostLoginRevoke(addrLower, firmwareVersion);
+            void this.checkAndNotifyFirmwareUpdate(addrLower, firmwareVersion);
           });
           return;
         }
@@ -812,6 +814,44 @@ export class ASyncTCPService implements TCPCallback {
       this.getDeviceIp(active.device)
     );
     console.log('Revoke acknowledged by device', active.device, 'project', active.project);
+  }
+
+  /**
+   * Check if a newly-connected device has an available firmware update.
+   * Only notifies if the device is on an older version than the current release.
+   */
+  private async checkAndNotifyFirmwareUpdate(deviceAddress: string, firmwareVersion?: string): Promise<void> {
+    if (!firmwareVersion) return;
+
+    let firmware: FirmwareService;
+    try {
+      firmware = FirmwareService.getInstance();
+    } catch {
+      return;
+    }
+
+    const parsed = FirmwareVersionParser.parse(firmwareVersion);
+    if (!parsed) {
+      return;
+    }
+
+    const latest = firmware.getLatestFirmware(parsed.project);
+    if (!latest) {
+      return;
+    }
+
+    const isOlder = FirmwareVersionParser.isOlder(parsed.semver, latest.version);
+    if (isOlder === true) {
+      try {
+        await this.sendApiCallToDevice(deviceAddress, 'updateReady', {});
+        this.telemetry.recordFirmwareNotify(deviceAddress, parsed.project, latest.version);
+        console.log(
+          `[Firmware] Notified ${deviceAddress} on login: ${parsed.semver} -> ${latest.version}`
+        );
+      } catch (err) {
+        console.error(`[Firmware] Failed to notify ${deviceAddress} on login:`, err);
+      }
+    }
   }
 
   private handlePostLoginRevoke(deviceAddress: string, firmwareVersion?: string): void {

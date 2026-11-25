@@ -2,15 +2,16 @@
 /**
  * Firmware Upload Tool
  * 
- * Signs and uploads firmware binaries to the proxy with admin authentication
+ * Signs and uploads firmware binaries to the proxy with admin authentication.
+ * By default, automatically notifies all connected devices with older versions.
  * 
  * Usage:
- *   npm run firmware:upload <project> <version> <firmware.bin> [--notify]
- *   OR: ts-node tools/firmware/upload.ts <project> <version> <firmware.bin> [--notify]
+ *   npm run firmware:upload -- <project> <version> <firmware.bin> [--no-notify]
+ *   OR: ts-node tools/firmware/upload.ts <project> <version> <firmware.bin> [--no-notify]
  * 
- * Example:
- *   npm run firmware:upload GarageDoor 1.2.3 firmware.bin
- *   npm run firmware:upload GarageDoor 1.2.3 firmware.bin --notify
+ * Examples:
+ *   npm run firmware:upload -- garagedoor 1.2.3 firmware.bin
+ *   npm run firmware:upload -- garagedoor 1.2.3 firmware.bin --no-notify
  * 
  * Requires .env with:
  *   PROXY_BASE_URL=https://your-proxy.com
@@ -60,7 +61,7 @@ async function uploadFirmware(
   project: string,
   version: string,
   firmwareBuffer: Buffer,
-  notify: boolean
+  autoNotify: boolean
 ): Promise<any> {
   if (!FIRMWARE_ADMIN_KEY) {
     throw new Error('FIRMWARE_ADMIN_KEY not set in .env');
@@ -81,13 +82,15 @@ async function uploadFirmware(
   console.log(`Signature: ${signature}`);
   console.log(`Signing address: ${wallet.address}`);
 
-  // Upload firmware
-  const notifyParam = notify ? '&notify=true' : '';
-  const url = `${PROXY_BASE_URL}/api/firmware/${encodeURIComponent(project)}?version=${encodeURIComponent(version)}&signature=${encodeURIComponent(signature)}&message=${encodeURIComponent(message)}${notifyParam}`;
+  // Upload firmware - autoNotify=true by default, unless --no-notify is passed
+  const autoNotifyParam = autoNotify ? '' : '&autoNotify=false';
+  const url = `${PROXY_BASE_URL}/api/firmware/${encodeURIComponent(project)}?version=${encodeURIComponent(version)}&signature=${encodeURIComponent(signature)}&message=${encodeURIComponent(message)}${autoNotifyParam}`;
   
   console.log(`Uploading ${firmwareBuffer.length} bytes to ${project} v${version}...`);
-  if (notify) {
-    console.log('Will notify connected devices after upload');
+  if (!autoNotify) {
+    console.log('⚠️  Auto-notify disabled - devices will NOT be notified');
+  } else {
+    console.log('✓ Auto-notify enabled - will notify connected devices with older versions');
   }
   
   const response = await fetch(url, {
@@ -114,18 +117,24 @@ async function main() {
   const args = process.argv.slice(2);
   
   if (args.length < 3) {
-    console.error('Usage: ts-node upload.ts <project> <version> <firmware.bin> [--notify]');
-    console.error('Example: ts-node upload.ts GarageDoor 1.2.3 firmware.bin');
-    console.error('         ts-node upload.ts GarageDoor 1.2.3 firmware.bin --notify');
+    console.error('Usage: npm run firmware:upload -- <project> <version> <firmware.bin> [--no-notify]');
+    console.error('   OR: ts-node upload.ts <project> <version> <firmware.bin> [--no-notify]');
+    console.error('');
+    console.error('Examples:');
+    console.error('  npm run firmware:upload -- garagedoor 1.2.3 firmware.bin');
+    console.error('  npm run firmware:upload -- garagedoor 1.2.3 firmware.bin --no-notify');
     console.error('');
     console.error('Version must be plain semver MAJOR.MINOR.PATCH (e.g., 1.2.3)');
     console.error('Do not include project name, v prefix, or build suffix');
     console.error('This version must match the FIRMWARE_SEMVER in your device firmware');
+    console.error('');
+    console.error('By default, all connected devices with older versions are automatically notified.');
+    console.error('Use --no-notify to skip auto-notification for staged rollouts.');
     process.exit(1);
   }
 
-  const notify = args.includes('--notify');
-  const fileArgs = args.filter(a => a !== '--notify');
+  const noNotify = args.includes('--no-notify');
+  const fileArgs = args.filter(a => a !== '--no-notify');
   const [project, version, firmwarePath] = fileArgs;
 
   if (!FIRMWARE_ADMIN_KEY) {
@@ -148,19 +157,25 @@ async function main() {
   console.log(`Project: ${project}`);
   console.log(`Version: ${version}`);
   console.log(`File: ${firmwarePath}`);
-  console.log(`Notify: ${notify}`);
+  console.log(`Auto-notify: ${!noNotify}`);
 
   const firmwareBuffer = readFileSync(firmwarePath);
   const stats = statSync(firmwarePath);
   console.log(`Size: ${stats.size} bytes (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
 
-  const result = await uploadFirmware(project, version, firmwareBuffer, notify);
+  const result = await uploadFirmware(project, version, firmwareBuffer, !noNotify);
   
   console.log('\n✅ Upload successful!');
   console.log(JSON.stringify(result, null, 2));
   
-  if (notify && result.notified !== undefined) {
+  if (result.notified !== undefined) {
     console.log(`\n📢 Notified ${result.notified} device(s)`);
+    if (result.devices && result.devices.length > 0) {
+      console.log('\nNotified devices:');
+      for (const dev of result.devices) {
+        console.log(`  ${dev.address}: ${dev.oldVersion} → ${dev.newVersion}`);
+      }
+    }
   }
 }
 

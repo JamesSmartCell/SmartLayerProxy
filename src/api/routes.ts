@@ -1032,25 +1032,76 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         true
       );
 
-      const shouldNotify = req.query.notify === 'true';
+      // Auto-notify is enabled by default; opt out with autoNotify=false
+      const autoNotifyParam = req.query.autoNotify as string | undefined;
+      const shouldNotify = autoNotifyParam !== 'false';
       let notifyResult;
       
       if (shouldNotify) {
         try {
           const connectedDevices = tcpService.getConnectedDevices();
-          const notified: Array<{ address: string; version: string }> = [];
+          const notified: Array<{ address: string; oldVersion: string; newVersion: string }> = [];
+          const skipped: Array<{ address: string; version?: string; reason: string }> = [];
           
           for (const device of connectedDevices) {
-            if (device.project?.toLowerCase() === project.toLowerCase() && device.semver) {
-              const isOlderResult = FirmwareVersionParser.isOlder(device.semver, version);
-              if (isOlderResult === true) {
+            // Skip devices from different projects
+            if (!device.project || device.project.toLowerCase() !== project.toLowerCase()) {
+              continue;
+            }
+
+            // Skip devices without parseable version
+            if (!device.semver) {
+              console.log(`[Firmware] Skipping device ${device.address}: no parseable version (reported: ${device.firmwareVersion || 'none'})`);
+              skipped.push({ 
+                address: device.address, 
+                version: device.firmwareVersion, 
+                reason: 'no parseable version' 
+              });
+              continue;
+            }
+
+            // Check if device version is older than new release
+            const isOlderResult = FirmwareVersionParser.isOlder(device.semver, version);
+            if (isOlderResult === true) {
+              try {
                 await tcpService.sendApiCallToDevice(device.address, 'updateReady', {});
-                notified.push({ address: device.address, version: device.semver });
+                notified.push({ 
+                  address: device.address, 
+                  oldVersion: device.semver, 
+                  newVersion: version 
+                });
                 telemetry.recordFirmwareNotify(device.address, project, version);
+                console.log(`[Firmware] Notified ${device.address} about update: ${device.semver} -> ${version}`);
+              } catch (err) {
+                console.error(`[Firmware] Failed to notify ${device.address}:`, err);
+                skipped.push({ 
+                  address: device.address, 
+                  version: device.semver, 
+                  reason: 'send failed' 
+                });
               }
+            } else if (isOlderResult === false) {
+              // Device is on equal or newer version
+              skipped.push({ 
+                address: device.address, 
+                version: device.semver, 
+                reason: 'already up to date or newer' 
+              });
+            } else {
+              // Version comparison failed
+              console.log(`[Firmware] Skipping device ${device.address}: version comparison failed (${device.semver} vs ${version})`);
+              skipped.push({ 
+                address: device.address, 
+                version: device.semver, 
+                reason: 'version comparison failed' 
+              });
             }
           }
-          notifyResult = { notified: notified.length };
+          notifyResult = { notified: notified.length, devices: notified, skipped };
+          
+          if (notified.length > 0) {
+            console.log(`[Firmware] Upload ${project} ${version}: notified ${notified.length} device(s), skipped ${skipped.length}`);
+          }
         } catch (err) {
           console.error('[Firmware] Auto-notify error:', err);
         }
@@ -1064,7 +1115,7 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
         size: metadata.size,
         url: metadata.url,
         uploadedBy: metadata.uploadedBy,
-        ...(notifyResult ? { notified: notifyResult.notified } : {})
+        ...(notifyResult ? { notified: notifyResult.notified, devices: notifyResult.devices, skipped: notifyResult.skipped } : {})
       });
     } catch (err) {
       console.error('[Firmware] Upload error:', err);
