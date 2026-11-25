@@ -1,5 +1,8 @@
 # SmartLayerProxy (TypeScript)
 
+![Version](https://img.shields.io/endpoint?url=https%3A%2F%2Fscriptproxy.percolate.one%2Fapi%2Fbadge%2Fversion)  
+![Connected Devices](https://img.shields.io/endpoint?url=https%3A%2F%2Fscriptproxy.percolate.one%2Fapi%2Fbadge%2Fdevices)
+
 Lightweight TypeScript port of the Java SmartLayerProxy. Uses significantly fewer resources than the Spring Boot version.
 
 ## Features

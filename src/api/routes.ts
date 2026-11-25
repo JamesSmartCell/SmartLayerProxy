@@ -126,6 +126,38 @@ function getAdminAddresses(): string[] {
   return [...config.adminAddresses, ...config.telemetryAdminAddresses];
 }
 
+function resolveVersionString(): string {
+  try {
+    const pkg = require('../../package.json');
+    let version = pkg.version;
+    
+    const gitCommit = process.env.GIT_COMMIT;
+    if (gitCommit && gitCommit.length >= 7) {
+      version += `+${gitCommit.substring(0, 7)}`;
+    } else {
+      try {
+        const { execSync } = require('child_process');
+        const sha = execSync('git rev-parse --short=7 HEAD', { 
+          encoding: 'utf-8', 
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 1000 
+        }).trim();
+        if (sha && /^[0-9a-f]{7}$/.test(sha)) {
+          version += `+${sha}`;
+        }
+      } catch {
+        // Git not available or not a git repo
+      }
+    }
+    return version;
+  } catch (err) {
+    console.error('[Badge] Failed to resolve version:', err);
+    return 'unknown';
+  }
+}
+
+const cachedVersionString = resolveVersionString();
+
 export function createRouter(service: ASyncService, tcpService: ASyncTCPService): Router {
   const router = Router();
   const telemetry = TelemetryService.getInstance();
@@ -1754,6 +1786,70 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
 
     res.status(201).send(response);
   }
+
+  router.get('/badge/version', (_req, res) => {
+    res.set({
+      'Cache-Control': 'max-age=60',
+      'Access-Control-Allow-Origin': '*',
+      'Content-Type': 'application/json'
+    });
+
+    res.json({
+      schemaVersion: 1,
+      label: 'version',
+      message: cachedVersionString,
+      color: 'blue'
+    });
+  });
+
+  router.get('/badge/devices', (_req, res) => {
+    try {
+      const tcpDevices = tcpService.getConnectedDevices();
+      
+      let udpCount = 0;
+      const udpAddresses = new Set<string>();
+      try {
+        const serviceAny = service as any;
+        if (serviceAny.addressToClient && typeof serviceAny.addressToClient.size === 'number') {
+          for (const [addr, instances] of serviceAny.addressToClient) {
+            if (Array.isArray(instances) && instances.length > 0) {
+              const latest = instances[instances.length - 1];
+              if (latest?.validated) {
+                udpAddresses.add(addr);
+              }
+            }
+          }
+          udpCount = udpAddresses.size;
+        }
+      } catch {
+        // UDP tracking not available
+      }
+
+      const tcpAddresses = new Set(tcpDevices.map(d => d.address.toLowerCase()));
+      const totalUnique = new Set([...tcpAddresses, ...udpAddresses]).size;
+
+      res.set({
+        'Cache-Control': 'max-age=60',
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
+      });
+
+      res.json({
+        schemaVersion: 1,
+        label: 'connected devices',
+        message: totalUnique.toString(),
+        color: totalUnique > 0 ? 'green' : 'lightgrey'
+      });
+    } catch (err) {
+      console.error('Badge devices error:', err);
+      res.status(500).json({
+        schemaVersion: 1,
+        label: 'connected devices',
+        message: 'error',
+        color: 'red'
+      });
+    }
+  });
 
   router.all('/:Address/:method', async (req, res) => {
     try {
