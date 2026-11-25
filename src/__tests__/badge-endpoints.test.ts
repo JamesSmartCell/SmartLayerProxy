@@ -97,21 +97,38 @@ describe('Badge Endpoints', () => {
       expect(bodyStr).not.toMatch(/password|secret|key|token/i);
     });
 
-    it('should include git commit SHA when GIT_COMMIT env var is set', async () => {
-      const originalGitCommit = process.env.GIT_COMMIT;
-      process.env.GIT_COMMIT = 'abc1234567890';
-
-      const response = await request(app)
+    it('should return cached version consistently across multiple requests', async () => {
+      const response1 = await request(app)
         .get('/api/badge/version')
         .expect(200);
 
-      expect(response.body.message).toContain('+abc1234');
+      const response2 = await request(app)
+        .get('/api/badge/version')
+        .expect(200);
 
-      if (originalGitCommit !== undefined) {
-        process.env.GIT_COMMIT = originalGitCommit;
-      } else {
-        delete process.env.GIT_COMMIT;
-      }
+      const response3 = await request(app)
+        .get('/api/badge/version')
+        .expect(200);
+
+      expect(response1.body.message).toBe(response2.body.message);
+      expect(response2.body.message).toBe(response3.body.message);
+    });
+
+    it('should not spawn processes during request handling', async () => {
+      const childProcess = require('child_process');
+      const execSyncSpy = vi.spyOn(childProcess, 'execSync');
+
+      await request(app)
+        .get('/api/badge/version')
+        .expect(200);
+
+      await request(app)
+        .get('/api/badge/version')
+        .expect(200);
+
+      expect(execSyncSpy).not.toHaveBeenCalled();
+      
+      execSyncSpy.mockRestore();
     });
   });
 

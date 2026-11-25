@@ -126,6 +126,38 @@ function getAdminAddresses(): string[] {
   return [...config.adminAddresses, ...config.telemetryAdminAddresses];
 }
 
+function resolveVersionString(): string {
+  try {
+    const pkg = require('../../package.json');
+    let version = pkg.version;
+    
+    const gitCommit = process.env.GIT_COMMIT;
+    if (gitCommit && gitCommit.length >= 7) {
+      version += `+${gitCommit.substring(0, 7)}`;
+    } else {
+      try {
+        const { execSync } = require('child_process');
+        const sha = execSync('git rev-parse --short=7 HEAD', { 
+          encoding: 'utf-8', 
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 1000 
+        }).trim();
+        if (sha && /^[0-9a-f]{7}$/.test(sha)) {
+          version += `+${sha}`;
+        }
+      } catch {
+        // Git not available or not a git repo
+      }
+    }
+    return version;
+  } catch (err) {
+    console.error('[Badge] Failed to resolve version:', err);
+    return 'unknown';
+  }
+}
+
+const cachedVersionString = resolveVersionString();
+
 export function createRouter(service: ASyncService, tcpService: ASyncTCPService): Router {
   const router = Router();
   const telemetry = TelemetryService.getInstance();
@@ -1756,50 +1788,18 @@ export function createRouter(service: ASyncService, tcpService: ASyncTCPService)
   }
 
   router.get('/badge/version', (_req, res) => {
-    try {
-      const pkg = require('../../package.json');
-      let version = pkg.version;
-      
-      const gitCommit = process.env.GIT_COMMIT;
-      if (gitCommit && gitCommit.length >= 7) {
-        version += `+${gitCommit.substring(0, 7)}`;
-      } else {
-        try {
-          const { execSync } = require('child_process');
-          const sha = execSync('git rev-parse --short=7 HEAD', { 
-            encoding: 'utf-8', 
-            stdio: ['ignore', 'pipe', 'ignore'],
-            timeout: 1000 
-          }).trim();
-          if (sha && /^[0-9a-f]{7}$/.test(sha)) {
-            version += `+${sha}`;
-          }
-        } catch {
-          // Git not available or not a git repo
-        }
-      }
+    res.set({
+      'Cache-Control': 'max-age=60',
+      'Access-Control-Allow-Origin': '*',
+      'Content-Type': 'application/json'
+    });
 
-      res.set({
-        'Cache-Control': 'max-age=60',
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      });
-
-      res.json({
-        schemaVersion: 1,
-        label: 'version',
-        message: version,
-        color: 'blue'
-      });
-    } catch (err) {
-      console.error('Badge version error:', err);
-      res.status(500).json({
-        schemaVersion: 1,
-        label: 'version',
-        message: 'error',
-        color: 'red'
-      });
-    }
+    res.json({
+      schemaVersion: 1,
+      label: 'version',
+      message: cachedVersionString,
+      color: 'blue'
+    });
   });
 
   router.get('/badge/devices', (_req, res) => {
